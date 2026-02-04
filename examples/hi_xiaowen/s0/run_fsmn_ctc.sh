@@ -110,7 +110,7 @@ fi
 # Run separately: bash run_fsmn_ctc.sh 1.5 1.5
 if [ ${stage} == "1.5" ]; then
   echo "Building metadata database for WebUI..."
-  tools/build_metadata_db.py --force
+  tools/generate_metadata_db.py --force
   echo ""
   echo "✅ Database built successfully!"
   echo "📁 Database location: data/metadata.db"

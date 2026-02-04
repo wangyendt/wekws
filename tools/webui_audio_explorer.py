@@ -78,7 +78,7 @@ bash run_fsmn_ctc.sh 1.5 1.5
 **方法2：直接运行**
 ```bash
 cd /path/to/project/examples/hi_xiaowen/s0
-tools/build_metadata_db.py
+tools/generate_metadata_db.py
 ```
         """)
         st.stop()
