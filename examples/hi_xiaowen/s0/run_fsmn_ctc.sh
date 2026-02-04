@@ -12,6 +12,9 @@
 
 . ./path.sh
 
+# 过滤 torchaudio 弃用警告
+export PYTHONWARNINGS="ignore::UserWarning"
+
 # 保存原始参数用于日志
 original_args="$@"
 
@@ -31,7 +34,7 @@ num_average=30
 
 # 尝试从配置文件读取 download_dir
 if [ -f wayne_scripts/config.yaml ]; then
-    config_download_dir=$(python3 tools/read_config.py download_dir 2>/dev/null)
+    config_download_dir=$(python tools/read_config.py download_dir 2>/dev/null)
     if [ $? -eq 0 ] && [ -n "$config_download_dir" ]; then
         download_dir="$config_download_dir"
         echo "✅ 从 config.yaml 读取 download_dir: $download_dir"
@@ -194,8 +197,8 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   $norm_var && cmvn_opts="$cmvn_opts --norm_var"
   num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
 
-  # 使用当前环境的 python3 运行 torchrun，避免使用系统 Python 3.8
-  python3 -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$num_gpus \
+  # 使用当前 conda 环境的 python，而非系统 python
+  python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$num_gpus \
     wekws/bin/train.py --gpus $gpus \
       --config $config \
       --train_data data/train/data.list \

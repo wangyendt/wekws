@@ -3,6 +3,11 @@
 
 import sys
 import platform
+import warnings
+
+# 过滤 torchaudio 相关的所有弃用警告
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import torchaudio
 
