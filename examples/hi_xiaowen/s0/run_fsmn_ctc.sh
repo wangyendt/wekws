@@ -42,13 +42,23 @@ fi
 . tools/parse_options.sh || exit 1;
 window_shift=50
 
-if [ ${stage} -le -2 ] && [ ${stop_stage} -ge -2 ]; then
+# 将浮点数 stage 转换为整数进行比较（如果是整数则直接使用）
+if [ "$stage" = "1.5" ] || [ "$stop_stage" = "1.5" ]; then
+  # Stage 1.5 是特殊的中间 stage，单独处理
+  stage_int=999
+  stop_stage_int=999
+else
+  stage_int=$(echo "$stage" | awk '{print int($1)}')
+  stop_stage_int=$(echo "$stop_stage" | awk '{print int($1)}')
+fi
+
+if [ ${stage_int} -le -2 ] && [ ${stop_stage_int} -ge -2 ]; then
   echo "Download and extracte all datasets"
   local/mobvoi_data_download.sh --dl_dir $download_dir
 fi
 
 
-if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
+if [ ${stage_int} -le -1 ] && [ ${stop_stage_int} -ge -1 ]; then
   echo "Preparing datasets..."
   mkdir -p dict
   echo "<FILLER> -1" > dict/dict.txt
@@ -70,7 +80,7 @@ if [ ${stage} -le -1 ] && [ ${stop_stage} -ge -1 ]; then
   done
 fi
 
-if [ ${stage} -le -0 ] && [ ${stop_stage} -ge -0 ]; then
+if [ ${stage_int} -le -0 ] && [ ${stop_stage_int} -ge -0 ]; then
 # Here we Use Paraformer Large(https://www.modelscope.cn/models/damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/summary)
 # to transcribe the negative wavs, and upload the transcription to modelscope.
   git clone https://www.modelscope.cn/datasets/thuduj12/mobvoi_kws_transcription.git
@@ -90,7 +100,7 @@ if [ ${stage} -le -0 ] && [ ${stop_stage} -ge -0 ]; then
   echo '<BLK>' >> dict/words.txt
 fi
 
-if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
+if [ ${stage_int} -le 1 ] && [ ${stop_stage_int} -ge 1 ]; then
   echo "Compute CMVN and Format datasets"
   tools/compute_cmvn_stats.py --num_workers 16 --train_config $config \
     --in_scp data/train/wav.scp \
@@ -110,18 +120,15 @@ fi
 # Run separately: bash run_fsmn_ctc.sh 1.5 1.5
 if [ ${stage} == "1.5" ]; then
   echo "Building metadata database for WebUI..."
-  tools/generate_metadata_db.py --force
-  echo ""
-  echo "✅ Database built successfully!"
-  echo "📁 Database location: data/metadata.db"
+  python3 tools/generate_metadata_db.py --output-db data/metadata.db --force
   echo ""
   echo "To start the WebUI, run:"
-  echo "  streamlit run tools/webui_audio_explorer.py"
+  echo "  cd wayne_scripts && sh stage_1.5_webui.sh"
   echo ""
   exit 0
 fi
 
-if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
+if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
 
   echo "Use the base model from modelscope"
   if [ ! -d speech_charctc_kws_phone-xiaoyun ] ;then
@@ -152,7 +159,7 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
       ${checkpoint:+--checkpoint $checkpoint}
 fi
 
-if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
+if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
   echo "Do model average, Compute FRR/FAR ..."
   if $average_model; then
     python wekws/bin/average_model.py \
@@ -191,7 +198,7 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
 fi
 
 
-if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
+if [ ${stage_int} -le 4 ] && [ ${stop_stage_int} -ge 4 ]; then
   jit_model=$(basename $score_checkpoint | sed -e 's:.pt$:.zip:g')
   onnx_model=$(basename $score_checkpoint | sed -e 's:.pt$:.onnx:g')
   # For now, FSMN can not export to JITScript

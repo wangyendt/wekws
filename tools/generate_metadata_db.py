@@ -133,9 +133,9 @@ def process_split(conn, download_dir, split_name, dataset_name='mobvoi_hotword')
     """
     print(f"\n处理 {split_name} 数据集...")
     
-    # 路径
+    # 路径 - data.list 在项目目录的 data/ 下，而不是 download_dir
     resources_dir = os.path.join(download_dir, 'mobvoi_hotword_dataset_resources')
-    data_list_path = os.path.join(download_dir, split_name, 'data.list')
+    data_list_path = os.path.join('data', split_name, 'data.list')
     
     # 加载 data.list（包含duration和text）
     print(f"  加载 data.list...")
@@ -383,11 +383,12 @@ def main():
         print(f"❌ 错误: download_dir 不存在: {download_dir}", file=sys.stderr)
         sys.exit(1)
     
-    # 设置数据库路径
+    # 设置数据库路径（默认保存到当前目录的 data 目录）
     if args.output_db:
         db_path = args.output_db
     else:
-        db_path = os.path.join(download_dir, 'metadata.db')
+        # 保存到当前工作目录的 data 目录
+        db_path = 'data/metadata.db'
     
     print("="*60)
     print("音频元数据数据库构建工具")
