@@ -13,6 +13,7 @@ import sqlite3
 import argparse
 from pathlib import Path
 from tqdm import tqdm
+from pywayne.tools import read_yaml_config
 
 
 def create_database(db_path):
@@ -126,15 +127,15 @@ def insert_metadata_batch(conn, metadata_list):
     conn.commit()
 
 
-def process_split(conn, project_dir, split_name, dataset_name='mobvoi_hotword'):
+def process_split(conn, download_dir, split_name, dataset_name='mobvoi_hotword'):
     """
     处理单个数据集分割（train/dev/test）
     """
     print(f"\n处理 {split_name} 数据集...")
     
     # 路径
-    resources_dir = os.path.join(project_dir, 'data/mobvoi_hotword_dataset_resources')
-    data_list_path = os.path.join(project_dir, f'data/{split_name}/data.list')
+    resources_dir = os.path.join(download_dir, 'mobvoi_hotword_dataset_resources')
+    data_list_path = os.path.join(download_dir, split_name, 'data.list')
     
     # 加载 data.list（包含duration和text）
     print(f"  加载 data.list...")
@@ -307,14 +308,22 @@ def main():
   python generate_metadata_db.py
   python generate_metadata_db.py --output-db ./metadata.db
   python generate_metadata_db.py --splits train dev test
+  python generate_metadata_db.py --config /path/to/config.yaml
         """
+    )
+    
+    parser.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        help='配置文件路径（默认: ../examples/hi_xiaowen/s0/wayne_scripts/config.yaml）'
     )
     
     parser.add_argument(
         '--output-db',
         type=str,
         default=None,
-        help='输出数据库路径（默认: data/metadata.db）'
+        help='输出数据库路径（默认: <download_dir>/metadata.db）'
     )
     
     parser.add_argument(
@@ -332,20 +341,59 @@ def main():
     
     args = parser.parse_args()
     
-    # 获取项目目录
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_dir = os.path.dirname(script_dir)
+    # 获取配置文件路径
+    if args.config:
+        config_path = args.config
+    else:
+        # 使用 resolve() 来解析符号链接，获取真实的物理路径
+        script_dir = Path(__file__).resolve().parent
+        config_path = script_dir.parent / 'examples' / 'hi_xiaowen' / 's0' / 'wayne_scripts' / 'config.yaml'
+    
+    config_path = Path(config_path)
+    
+    # 检查配置文件是否存在
+    if not config_path.exists():
+        print(f"❌ 错误: 配置文件不存在: {config_path}", file=sys.stderr)
+        print(f"请确保配置文件存在，或使用 --config 参数指定配置文件路径", file=sys.stderr)
+        sys.exit(1)
+    
+    # 读取配置文件
+    try:
+        config = read_yaml_config(str(config_path))
+    except Exception as e:
+        print(f"❌ 错误: 无法读取配置文件: {e}", file=sys.stderr)
+        sys.exit(1)
+    
+    # 获取 download_dir
+    if 'download_dir' not in config:
+        print(f"❌ 错误: 配置文件中未找到 'download_dir' 配置", file=sys.stderr)
+        sys.exit(1)
+    
+    download_dir = config['download_dir']
+    download_dir_path = Path(download_dir)
+    
+    # 转换相对路径为绝对路径
+    if not download_dir_path.is_absolute():
+        download_dir_path = (config_path.parent / download_dir_path).resolve()
+    
+    download_dir = str(download_dir_path)
+    
+    # 检查 download_dir 是否存在
+    if not download_dir_path.exists():
+        print(f"❌ 错误: download_dir 不存在: {download_dir}", file=sys.stderr)
+        sys.exit(1)
     
     # 设置数据库路径
     if args.output_db:
         db_path = args.output_db
     else:
-        db_path = os.path.join(project_dir, 'data/metadata.db')
+        db_path = os.path.join(download_dir, 'metadata.db')
     
     print("="*60)
     print("音频元数据数据库构建工具")
     print("="*60)
-    print(f"项目目录: {project_dir}")
+    print(f"配置文件: {config_path}")
+    print(f"数据目录: {download_dir}")
     print(f"数据库路径: {db_path}")
     print(f"处理数据集: {', '.join(args.splits)}")
     print("="*60)
@@ -371,7 +419,7 @@ def main():
         
         # 处理各个数据集分割
         for split in args.splits:
-            process_split(conn, project_dir, split)
+            process_split(conn, download_dir, split)
         
         # 打印统计信息
         print_statistics(conn)
