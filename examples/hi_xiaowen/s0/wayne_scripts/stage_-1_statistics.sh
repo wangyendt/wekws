@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Stage -1 统计脚本
 # 统计 train/dev/test 数据集的正负样本分布
 
@@ -69,13 +69,42 @@ statistics() {
     echo "使用文件: $file_type"
     echo ""
     
-    # 统计总样本数
-    total=$(wc -l < "$target_file")
+    # 统计总样本数（去除空格和换行）
+    total=$(wc -l < "$target_file" 2>/dev/null)
+    total=$(echo "$total" | tr -d ' \n\r')
+    total=${total:-0}
     
-    # 统计各类样本数
-    hi_xiaowen=$(grep -c "<HI_XIAOWEN>" "$target_file" || echo "0")
-    nihao_wenwen=$(grep -c "<NIHAO_WENWEN>" "$target_file" || echo "0")
-    filler=$(grep -c "<FILLER>" "$target_file" || echo "0")
+    # 检测文本格式：标签格式 vs ASR 转录格式
+    has_label_format=$(head -1 "$target_file" 2>/dev/null | grep -c "<" || echo "0")
+    has_label_format=$(echo "$has_label_format" | tr -d ' \n\r')
+    has_label_format=${has_label_format:-0}
+    
+    if [ "$has_label_format" -gt 0 ]; then
+        # 标签格式：<HI_XIAOWEN>, <NIHAO_WENWEN>, <FILLER>
+        hi_xiaowen=$(grep -c "<HI_XIAOWEN>" "$target_file" 2>/dev/null || echo "0")
+        hi_xiaowen=$(echo "$hi_xiaowen" | tr -d ' \n\r')
+        hi_xiaowen=${hi_xiaowen:-0}
+        
+        nihao_wenwen=$(grep -c "<NIHAO_WENWEN>" "$target_file" 2>/dev/null || echo "0")
+        nihao_wenwen=$(echo "$nihao_wenwen" | tr -d ' \n\r')
+        nihao_wenwen=${nihao_wenwen:-0}
+        
+        filler=$(grep -c "<FILLER>" "$target_file" 2>/dev/null || echo "0")
+        filler=$(echo "$filler" | tr -d ' \n\r')
+        filler=${filler:-0}
+    else
+        # ASR 转录格式：嗨 小 问, 你 好 问 问, 其他文本
+        hi_xiaowen=$(grep -c "嗨 小 问$" "$target_file" 2>/dev/null || echo "0")
+        hi_xiaowen=$(echo "$hi_xiaowen" | tr -d ' \n\r')
+        hi_xiaowen=${hi_xiaowen:-0}
+        
+        nihao_wenwen=$(grep -c "你 好 问 问$" "$target_file" 2>/dev/null || echo "0")
+        nihao_wenwen=$(echo "$nihao_wenwen" | tr -d ' \n\r')
+        nihao_wenwen=${nihao_wenwen:-0}
+        
+        # 负样本 = 总数 - 正样本
+        filler=$((total - hi_xiaowen - nihao_wenwen))
+    fi
     
     # 计算正负样本
     positive=$((hi_xiaowen + nihao_wenwen))
@@ -153,19 +182,70 @@ train_file=$(get_target_file "train")
 dev_file=$(get_target_file "dev")
 test_file=$(get_target_file "test")
 
-total_train=$([ -n "$train_file" ] && [ -f "$train_file" ] && wc -l < "$train_file" || echo "0")
-total_dev=$([ -n "$dev_file" ] && [ -f "$dev_file" ] && wc -l < "$dev_file" || echo "0")
-total_test=$([ -n "$test_file" ] && [ -f "$test_file" ] && wc -l < "$test_file" || echo "0")
+total_train=$([ -n "$train_file" ] && [ -f "$train_file" ] && wc -l < "$train_file" 2>/dev/null || echo "0")
+total_train=$(echo "$total_train" | tr -d ' \n\r'); total_train=${total_train:-0}
+
+total_dev=$([ -n "$dev_file" ] && [ -f "$dev_file" ] && wc -l < "$dev_file" 2>/dev/null || echo "0")
+total_dev=$(echo "$total_dev" | tr -d ' \n\r'); total_dev=${total_dev:-0}
+
+total_test=$([ -n "$test_file" ] && [ -f "$test_file" ] && wc -l < "$test_file" 2>/dev/null || echo "0")
+total_test=$(echo "$total_test" | tr -d ' \n\r'); total_test=${total_test:-0}
+
 total_all=$((total_train + total_dev + total_test))
 
-pos_train=$([ -n "$train_file" ] && [ -f "$train_file" ] && (grep -c "<HI_XIAOWEN>\|<NIHAO_WENWEN>" "$train_file" || echo "0") || echo "0")
-pos_dev=$([ -n "$dev_file" ] && [ -f "$dev_file" ] && (grep -c "<HI_XIAOWEN>\|<NIHAO_WENWEN>" "$dev_file" || echo "0") || echo "0")
-pos_test=$([ -n "$test_file" ] && [ -f "$test_file" ] && (grep -c "<HI_XIAOWEN>\|<NIHAO_WENWEN>" "$test_file" || echo "0") || echo "0")
-pos_all=$((pos_train + pos_dev + pos_test))
+# 检测文本格式
+has_label_format=0
+if [ -n "$train_file" ] && [ -f "$train_file" ]; then
+    has_label_format=$(head -1 "$train_file" 2>/dev/null | grep -c "<" || echo "0")
+    has_label_format=$(echo "$has_label_format" | tr -d ' \n\r')
+    has_label_format=${has_label_format:-0}
+fi
 
-neg_train=$([ -n "$train_file" ] && [ -f "$train_file" ] && (grep -c "<FILLER>" "$train_file" || echo "0") || echo "0")
-neg_dev=$([ -n "$dev_file" ] && [ -f "$dev_file" ] && (grep -c "<FILLER>" "$dev_file" || echo "0") || echo "0")
-neg_test=$([ -n "$test_file" ] && [ -f "$test_file" ] && (grep -c "<FILLER>" "$test_file" || echo "0") || echo "0")
+if [ "$has_label_format" -gt 0 ]; then
+    # 标签格式
+    pos_train=$([ -n "$train_file" ] && [ -f "$train_file" ] && (grep -c "<HI_XIAOWEN>\|<NIHAO_WENWEN>" "$train_file" 2>/dev/null || echo "0") || echo "0")
+    pos_train=$(echo "$pos_train" | tr -d ' \n\r'); pos_train=${pos_train:-0}
+    
+    pos_dev=$([ -n "$dev_file" ] && [ -f "$dev_file" ] && (grep -c "<HI_XIAOWEN>\|<NIHAO_WENWEN>" "$dev_file" 2>/dev/null || echo "0") || echo "0")
+    pos_dev=$(echo "$pos_dev" | tr -d ' \n\r'); pos_dev=${pos_dev:-0}
+    
+    pos_test=$([ -n "$test_file" ] && [ -f "$test_file" ] && (grep -c "<HI_XIAOWEN>\|<NIHAO_WENWEN>" "$test_file" 2>/dev/null || echo "0") || echo "0")
+    pos_test=$(echo "$pos_test" | tr -d ' \n\r'); pos_test=${pos_test:-0}
+    
+    neg_train=$([ -n "$train_file" ] && [ -f "$train_file" ] && (grep -c "<FILLER>" "$train_file" 2>/dev/null || echo "0") || echo "0")
+    neg_train=$(echo "$neg_train" | tr -d ' \n\r'); neg_train=${neg_train:-0}
+    
+    neg_dev=$([ -n "$dev_file" ] && [ -f "$dev_file" ] && (grep -c "<FILLER>" "$dev_file" 2>/dev/null || echo "0") || echo "0")
+    neg_dev=$(echo "$neg_dev" | tr -d ' \n\r'); neg_dev=${neg_dev:-0}
+    
+    neg_test=$([ -n "$test_file" ] && [ -f "$test_file" ] && (grep -c "<FILLER>" "$test_file" 2>/dev/null || echo "0") || echo "0")
+    neg_test=$(echo "$neg_test" | tr -d ' \n\r'); neg_test=${neg_test:-0}
+else
+    # ASR 转录格式
+    hi_train=$([ -n "$train_file" ] && [ -f "$train_file" ] && (grep -c "嗨 小 问$" "$train_file" 2>/dev/null || echo "0") || echo "0")
+    hi_train=$(echo "$hi_train" | tr -d ' \n\r'); hi_train=${hi_train:-0}
+    nh_train=$([ -n "$train_file" ] && [ -f "$train_file" ] && (grep -c "你 好 问 问$" "$train_file" 2>/dev/null || echo "0") || echo "0")
+    nh_train=$(echo "$nh_train" | tr -d ' \n\r'); nh_train=${nh_train:-0}
+    pos_train=$((hi_train + nh_train))
+    
+    hi_dev=$([ -n "$dev_file" ] && [ -f "$dev_file" ] && (grep -c "嗨 小 问$" "$dev_file" 2>/dev/null || echo "0") || echo "0")
+    hi_dev=$(echo "$hi_dev" | tr -d ' \n\r'); hi_dev=${hi_dev:-0}
+    nh_dev=$([ -n "$dev_file" ] && [ -f "$dev_file" ] && (grep -c "你 好 问 问$" "$dev_file" 2>/dev/null || echo "0") || echo "0")
+    nh_dev=$(echo "$nh_dev" | tr -d ' \n\r'); nh_dev=${nh_dev:-0}
+    pos_dev=$((hi_dev + nh_dev))
+    
+    hi_test=$([ -n "$test_file" ] && [ -f "$test_file" ] && (grep -c "嗨 小 问$" "$test_file" 2>/dev/null || echo "0") || echo "0")
+    hi_test=$(echo "$hi_test" | tr -d ' \n\r'); hi_test=${hi_test:-0}
+    nh_test=$([ -n "$test_file" ] && [ -f "$test_file" ] && (grep -c "你 好 问 问$" "$test_file" 2>/dev/null || echo "0") || echo "0")
+    nh_test=$(echo "$nh_test" | tr -d ' \n\r'); nh_test=${nh_test:-0}
+    pos_test=$((hi_test + nh_test))
+    
+    neg_train=$((total_train - pos_train))
+    neg_dev=$((total_dev - pos_dev))
+    neg_test=$((total_test - pos_test))
+fi
+
+pos_all=$((pos_train + pos_dev + pos_test))
 neg_all=$((neg_train + neg_dev + neg_test))
 
 printf "数据集      总样本数    正样本    负样本    正样本比例\n"
