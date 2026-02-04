@@ -1,11 +1,22 @@
 #!/bin/bash
 # Copyright 2021  Binbin Zhang(binbzha@qq.com)
 #           2023  Jing Du(thuduj12@163.com)
+#
+# 用法示例（注意：选项参数必须放在位置参数之前）:
+#   bash run_fsmn_ctc.sh 2 2                                        # 使用默认实验目录 exp/fsmn_ctc
+#   bash run_fsmn_ctc.sh --target_exp_dir exp/my_exp 2 2          # 指定实验目录（正确）
+#   bash run_fsmn_ctc.sh 2 2 --target_exp_dir exp/my_exp          # 错误！选项会被忽略
+#
+# 日志文件会自动保存到: <target_exp_dir>/logs/run_stage_<stage>_<stop_stage>_<timestamp>.log
+# 日志同时输出到终端和文件（使用 tee 命令）
 
 . ./path.sh
 
-stage=$1
-stop_stage=$2
+# 保存原始参数用于日志
+original_args="$@"
+
+stage=-1
+stop_stage=-1
 num_keywords=2599
 
 config=conf/fsmn_ctc.yaml
@@ -14,14 +25,9 @@ norm_var=true
 gpus="0"
 
 checkpoint=
-dir=exp/fsmn_ctc
+target_exp_dir=exp/fsmn_ctc
 average_model=true
 num_average=30
-if $average_model ;then
-  score_checkpoint=$dir/avg_${num_average}.pt
-else
-  score_checkpoint=$dir/final.pt
-fi
 
 # 尝试从配置文件读取 download_dir
 if [ -f wayne_scripts/config.yaml ]; then
@@ -40,7 +46,50 @@ else
 fi
 
 . tools/parse_options.sh || exit 1;
+
+# parse_options.sh 处理完选项后，剩余的是位置参数
+if [ $# -ge 1 ]; then
+  stage=$1
+fi
+if [ $# -ge 2 ]; then
+  stop_stage=$2
+fi
+
 window_shift=50
+
+# 设置实验目录
+dir=$target_exp_dir
+if $average_model ;then
+  score_checkpoint=$dir/avg_${num_average}.pt
+else
+  score_checkpoint=$dir/final.pt
+fi
+
+# 创建日志目录和日志文件
+log_dir=$dir/logs
+mkdir -p $log_dir
+
+# 生成日志文件名（带时间戳）
+timestamp=$(date +"%Y%m%d_%H%M%S")
+log_file=$log_dir/run_stage_${stage}_${stop_stage}_${timestamp}.log
+
+# 如果还没有重定向到 tee（避免递归）
+if [ -z "$LOG_REDIRECT_DONE" ]; then
+  echo "📝 实验目录: $dir"
+  echo "📝 日志文件: $log_file"
+  echo "================================================"
+  export LOG_REDIRECT_DONE=1
+  # 重新执行脚本，输出同时到终端和日志文件
+  exec > >(tee -a "$log_file") 2>&1
+  # 记录脚本开始时间和参数
+  echo "================================================"
+  echo "🚀 开始运行: $(date)"
+  echo "   命令: bash $0 $original_args"
+  echo "   Stage: $stage -> $stop_stage"
+  echo "   实验目录: $dir"
+  echo "   日志文件: $log_file"
+  echo "================================================"
+fi
 
 # 将浮点数 stage 转换为整数进行比较（如果是整数则直接使用）
 if [ "$stage" = "1.5" ] || [ "$stop_stage" = "1.5" ]; then
@@ -145,7 +194,8 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   $norm_var && cmvn_opts="$cmvn_opts --norm_var"
   num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
 
-  torchrun --standalone --nnodes=1 --nproc_per_node=$num_gpus \
+  # 使用当前环境的 python3 运行 torchrun，避免使用系统 Python 3.8
+  python3 -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$num_gpus \
     wekws/bin/train.py --gpus $gpus \
       --config $config \
       --train_data data/train/data.list \
@@ -210,4 +260,14 @@ if [ ${stage_int} -le 4 ] && [ ${stop_stage_int} -ge 4 ]; then
     --config $dir/config.yaml \
     --checkpoint $score_checkpoint \
     --onnx_model $dir/$onnx_model
+fi
+
+# 脚本结束日志
+if [ -n "$LOG_REDIRECT_DONE" ]; then
+  echo ""
+  echo "================================================"
+  echo "✅ 运行完成: $(date)"
+  echo "   实验目录: $dir"
+  echo "   日志文件: $log_file"
+  echo "================================================"
 fi
