@@ -23,7 +23,8 @@ else
   score_checkpoint=$dir/final.pt
 fi
 
-download_dir=/mnt/52_disk/back/DuJing/data/nihaowenwen # your data dir
+# download_dir=/mnt/52_disk/back/DuJing/data/nihaowenwen # your data dir
+download_dir=/Users/wayne/Documents/work/code/project/ffalcon/kws/wekws/examples/hi_xiaowen/s0/data
 
 . tools/parse_options.sh || exit 1;
 window_shift=50
@@ -89,6 +90,22 @@ if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
     tools/make_list.py data/$x/wav.scp data/$x/text \
       data/$x/wav.dur data/$x/data.list
   done
+fi
+
+# Stage 1.5 (Optional): Build metadata database for WebUI
+# This stage creates a SQLite database for fast searching and filtering
+# Run separately: bash run_fsmn_ctc.sh 1.5 1.5
+if [ ${stage} == "1.5" ]; then
+  echo "Building metadata database for WebUI..."
+  tools/build_metadata_db.py --force
+  echo ""
+  echo "✅ Database built successfully!"
+  echo "📁 Database location: data/metadata.db"
+  echo ""
+  echo "To start the WebUI, run:"
+  echo "  streamlit run tools/webui_audio_explorer.py"
+  echo ""
+  exit 0
 fi
 
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then

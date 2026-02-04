@@ -37,3 +37,5 @@ data
 raw_wav
 tensorboard
 **/*build*
+
+examples/hi_xiaowen/s0/mobvoi_kws_transcription

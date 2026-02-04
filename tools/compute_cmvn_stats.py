@@ -6,11 +6,55 @@ import argparse
 import json
 import codecs
 import yaml
+import platform
 
 import torch
 import torchaudio
 import torchaudio.compliance.kaldi as kaldi
 from torch.utils.data import Dataset, DataLoader
+
+
+# 根据操作系统自动选择合适的 backend
+def get_audio_backend():
+    """
+    根据操作系统和可用的 backend 选择最合适的音频后端
+    
+    Returns:
+        str or None: backend 名称，如果返回 None 则使用 torchaudio 默认
+    """
+    system = platform.system().lower()
+    
+    # 获取可用的 backends
+    try:
+        available_backends = torchaudio.list_audio_backends()
+    except:
+        available_backends = []
+    
+    if system == 'darwin':  # macOS
+        # macOS 通常使用 soundfile，sox 不可用
+        if 'soundfile' in available_backends:
+            return 'soundfile'
+        return None  # 使用默认
+    elif system == 'linux':
+        # Linux 优先使用 sox，不可用则使用 soundfile
+        if 'sox' in available_backends:
+            return 'sox'
+        elif 'soundfile' in available_backends:
+            return 'soundfile'
+        return None
+    else:  # Windows 等其他系统
+        # 使用 soundfile 或默认
+        if 'soundfile' in available_backends:
+            return 'soundfile'
+        return None
+
+
+# 全局 backend 配置
+AUDIO_BACKEND = get_audio_backend()
+if AUDIO_BACKEND:
+    print(f"使用音频后端: {AUDIO_BACKEND} (系统: {platform.system()})", file=sys.stderr)
+else:
+    print(f"使用默认音频后端 (系统: {platform.system()})", file=sys.stderr)
 
 
 class CollateFunc(object):
@@ -31,20 +75,35 @@ class CollateFunc(object):
             value = item[1].strip().split(",")
             assert len(value) == 3 or len(value) == 1
             wav_path = value[0]
-            sample_rate = torchaudio.info(wav_path, backend='sox').sample_rate
+            
+            # 根据系统使用合适的 backend
+            if AUDIO_BACKEND:
+                sample_rate = torchaudio.info(wav_path, backend=AUDIO_BACKEND).sample_rate
+            else:
+                sample_rate = torchaudio.info(wav_path).sample_rate
+            
             resample_rate = sample_rate
             # len(value) == 3 means segmented wav.scp,
             # len(value) == 1 means original wav.scp
             if len(value) == 3:
                 start_frame = int(float(value[1]) * sample_rate)
                 end_frame = int(float(value[2]) * sample_rate)
-                waveform, sample_rate = torchaudio.load(
-                    filepath=wav_path,
-                    num_frames=end_frame - start_frame,
-                    frame_offset=start_frame,
-                    backend='sox')
+                if AUDIO_BACKEND:
+                    waveform, sample_rate = torchaudio.load(
+                        filepath=wav_path,
+                        num_frames=end_frame - start_frame,
+                        frame_offset=start_frame,
+                        backend=AUDIO_BACKEND)
+                else:
+                    waveform, sample_rate = torchaudio.load(
+                        filepath=wav_path,
+                        num_frames=end_frame - start_frame,
+                        frame_offset=start_frame)
             else:
-                waveform, sample_rate = torchaudio.load(item[1])
+                if AUDIO_BACKEND:
+                    waveform, sample_rate = torchaudio.load(item[1], backend=AUDIO_BACKEND)
+                else:
+                    waveform, sample_rate = torchaudio.load(item[1])
 
             waveform = waveform * (1 << 15)
             if self.resample_rate != 0 and self.resample_rate != sample_rate:
