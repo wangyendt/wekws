@@ -21,6 +21,8 @@ import torchaudio
 import torchaudio.compliance.kaldi as kaldi
 import torchaudio.transforms as T
 import torch
+from pathlib import Path
+from pywayne.tools import read_yaml_config
 
 # ==================== 中文字体配置 ====================
 def setup_chinese_fonts():
@@ -78,13 +80,27 @@ def find_audio_file(audio_id, project_dir):
     """
     根据音频ID查找对应的wav文件
     """
-    # 可能的路径
-    wav_path = os.path.join(project_dir, 'data/mobvoi_hotword_dataset', f'{audio_id}.wav')
+    # 尝试从配置文件获取路径
+    script_dir = Path(project_dir) / 'wayne_scripts'
+    config_file = script_dir / 'config.yaml'
     
-    if not os.path.exists(wav_path):
+    if config_file.exists():
+        config = read_yaml_config(str(config_file))
+        download_dir = Path(config['download_dir'])
+        if not download_dir.is_absolute():
+            download_dir = (script_dir / download_dir).resolve()
+        
+        wav_subdir = config.get('wav_dir', 'mobvoi_hotword_dataset')
+        wav_dir = download_dir / wav_subdir if not Path(wav_subdir).is_absolute() else Path(wav_subdir)
+        wav_path = wav_dir / f'{audio_id}.wav'
+    else:
+        # 如果配置文件不存在，使用默认路径
+        wav_path = Path(project_dir) / 'data/mobvoi_hotword_dataset' / f'{audio_id}.wav'
+    
+    if not wav_path.exists():
         raise FileNotFoundError(f"找不到音频文件: {wav_path}")
     
-    return wav_path
+    return str(wav_path)
 
 
 def load_cmvn_stats(project_dir):
@@ -391,7 +407,17 @@ def main():
     if args.output_dir:
         output_dir = args.output_dir
     else:
-        output_dir = os.path.join(script_dir, 'visualizations')
+        # 尝试从配置文件读取
+        config_file = Path(script_dir) / 'config.yaml'
+        if config_file.exists():
+            config = read_yaml_config(str(config_file))
+            output_subdir = config.get('visualizations_dir', './visualizations')
+            output_dir = Path(output_subdir)
+            if not output_dir.is_absolute():
+                output_dir = (Path(script_dir) / output_dir).resolve()
+            output_dir = str(output_dir)
+        else:
+            output_dir = os.path.join(script_dir, 'visualizations')
     
     os.makedirs(output_dir, exist_ok=True)
     

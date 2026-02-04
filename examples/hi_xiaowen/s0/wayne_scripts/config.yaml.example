@@ -1,0 +1,55 @@
+# Wayne Scripts 配置文件示例
+# 用于统一管理不同电脑上的数据路径配置
+#
+# 使用方法：
+# 1. 复制此文件为 config.yaml: cp config.yaml.example config.yaml
+# 2. 修改 config.yaml 中的路径为你的实际路径
+# 3. config.yaml 不会被 git 跟踪，可以放心修改
+
+# ============================================================
+# 数据路径配置
+# ============================================================
+
+# 数据下载根目录（包含 wav 和 json 数据）
+# 不同电脑修改这个路径即可
+download_dir: /home/data/datasets/kws/opensourced/nihaowenwen
+
+# WAV 文件目录（相对于 download_dir 或绝对路径）
+wav_dir: mobvoi_hotword_dataset
+
+# JSON 文件目录（相对于 download_dir 或绝对路径）
+json_dir: mobvoi_hotword_dataset_resources
+
+# ============================================================
+# 输出路径配置
+# ============================================================
+
+# 统计图表输出目录（相对于 wayne_scripts 目录）
+statistics_plots_dir: ./statistics_plots
+
+# 可视化输出目录（相对于 wayne_scripts 目录）
+visualizations_dir: ./visualizations
+
+# ============================================================
+# 多线程配置
+# ============================================================
+
+# 最大工作线程数（用于数据处理）
+# 设置为 null 则自动检测 CPU 核心数
+max_workers: null
+
+# ============================================================
+# 常见配置示例（不同电脑）
+# ============================================================
+
+# # macOS 示例：
+# download_dir: /Users/wayne/Documents/work/data/kws/nihaowenwen
+# 
+# # Linux 服务器示例：
+# download_dir: /home/data/datasets/kws/opensourced/nihaowenwen
+#
+# # Windows 示例：
+# download_dir: D:/data/kws/nihaowenwen
+#
+# # 相对路径示例（相对于项目根目录）：
+# download_dir: ./data

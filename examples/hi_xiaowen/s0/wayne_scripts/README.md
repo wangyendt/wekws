@@ -15,18 +15,42 @@
 | `stage_1_visualize.py` | 音频特征可视化工具 |
 | `stage_1.5_webui.sh` | 启动 WebUI 数据浏览器 |
 
+## ⚙️ 配置文件
+
+**配置文件：** `config.yaml`（需要手动创建）
+
+```yaml
+# 数据路径
+download_dir: /home/data/datasets/kws/opensourced/nihaowenwen
+wav_dir: mobvoi_hotword_dataset
+json_dir: mobvoi_hotword_dataset_resources
+
+# 输出路径
+statistics_plots_dir: ./statistics_plots
+visualizations_dir: ./visualizations
+
+# 多线程配置
+max_workers: null  # null = 自动检测
+```
+
+**首次使用：**
+```bash
+cp config.yaml.example config.yaml
+vim config.yaml  # 修改 download_dir
+```
+
 ## 🚀 使用
 
 ```bash
 # 数据集统计
 python3 stage_-2_statistics.py
 
+# 音频可视化
+python3 stage_1_visualize.py <audio_id>
+
 # Stage 说明
 sh stage_0_statistics.sh
 sh stage_1_statistics.sh
-
-# 音频可视化
-python3 stage_1_visualize.py <audio_id>
 ```
 
 ## 📊 WebUI
@@ -40,3 +64,4 @@ bash run_fsmn_ctc.sh 1.5 1.5
 cd wayne_scripts
 sh stage_1.5_webui.sh
 ```
+

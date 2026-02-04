@@ -23,8 +23,21 @@ else
   score_checkpoint=$dir/final.pt
 fi
 
-# download_dir=/mnt/52_disk/back/DuJing/data/nihaowenwen # your data dir
-download_dir=/Users/wayne/Documents/work/code/project/ffalcon/kws/wekws/examples/hi_xiaowen/s0/data
+# 尝试从配置文件读取 download_dir
+if [ -f wayne_scripts/config.yaml ]; then
+    config_download_dir=$(python3 tools/read_config.py download_dir 2>/dev/null)
+    if [ $? -eq 0 ] && [ -n "$config_download_dir" ]; then
+        download_dir="$config_download_dir"
+        echo "✅ 从 config.yaml 读取 download_dir: $download_dir"
+    else
+        download_dir=/home/data/datasets/kws/opensourced/nihaowenwen
+        echo "⚠️  配置文件读取失败，使用默认 download_dir: $download_dir"
+    fi
+else
+    # download_dir=/mnt/52_disk/back/DuJing/data/nihaowenwen # your data dir
+    # download_dir=/Users/wayne/Documents/work/code/project/ffalcon/kws/wekws/examples/hi_xiaowen/s0/data
+    download_dir=/home/data/datasets/kws/opensourced/nihaowenwen
+fi
 
 . tools/parse_options.sh || exit 1;
 window_shift=50

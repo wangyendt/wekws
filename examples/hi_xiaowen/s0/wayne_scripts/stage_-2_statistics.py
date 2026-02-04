@@ -19,6 +19,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 import time
+from pywayne.tools import read_yaml_config
 
 # 设置默认编码为 UTF-8，兼容 Mac 和 Linux
 if sys.platform.startswith('darwin') or sys.platform.startswith('linux'):
@@ -587,19 +588,42 @@ def main():
     # 获取脚本所在目录
     script_dir = Path(__file__).parent
     
-    # 使用相对路径
-    wav_dir = script_dir / "../data/mobvoi_hotword_dataset"
-    json_dir = script_dir / "../data/mobvoi_hotword_dataset_resources"
-    output_dir = script_dir / "./statistics_plots"
+    # 从配置文件加载路径
+    config_file = script_dir / "config.yaml"
+    if config_file.exists():
+        config = read_yaml_config(str(config_file))
+        
+        # 解析路径
+        download_dir = Path(config['download_dir'])
+        if not download_dir.is_absolute():
+            download_dir = (script_dir / download_dir).resolve()
+        
+        wav_subdir = config.get('wav_dir', 'mobvoi_hotword_dataset')
+        json_subdir = config.get('json_dir', 'mobvoi_hotword_dataset_resources')
+        
+        wav_dir = download_dir / wav_subdir if not Path(wav_subdir).is_absolute() else Path(wav_subdir)
+        json_dir = download_dir / json_subdir if not Path(json_subdir).is_absolute() else Path(json_subdir)
+        
+        output_subdir = config.get('statistics_plots_dir', './statistics_plots')
+        output_dir = Path(output_subdir)
+        if not output_dir.is_absolute():
+            output_dir = (script_dir / output_dir).resolve()
+        
+        print("✅ 已从 config.yaml 加载路径配置")
+    else:
+        # 如果配置文件不存在，使用默认相对路径
+        print(f"⚠️  配置文件不存在: {config_file}，使用默认路径")
+        wav_dir = (script_dir / "../data/mobvoi_hotword_dataset").resolve()
+        json_dir = (script_dir / "../data/mobvoi_hotword_dataset_resources").resolve()
+        output_dir = (script_dir / "./statistics_plots").resolve()
     
-    # 转为绝对路径
-    wav_dir = wav_dir.resolve()
-    json_dir = json_dir.resolve()
-    output_dir = output_dir.resolve()
-    
-    # 自动检测CPU核心数
+    # 自动检测CPU核心数或从配置文件读取
     cpu_count = os.cpu_count()
-    max_workers = min(cpu_count * 3, 32)  # IO密集型，使用CPU核心数的3倍
+    if config_file.exists():
+        config_max_workers = config.get('max_workers')
+        max_workers = config_max_workers if config_max_workers is not None else min(cpu_count * 3, 32)
+    else:
+        max_workers = min(cpu_count * 3, 32)  # IO密集型，使用CPU核心数的3倍
     
     print("=" * 80)
     print("数据统计脚本（多线程优化版 - 缓存模式）")

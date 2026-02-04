@@ -1,2 +1,5 @@
 statistics_plots/
 visualizations/
+
+# 本地配置文件（不同电脑路径不同，不提交到 git）
+config.yaml
