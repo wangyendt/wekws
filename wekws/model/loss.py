@@ -209,6 +209,7 @@ def ctc_prefix_beam_search(
     keywords_tokenset: set = None,
     score_beam_size: int = 3,
     path_beam_size: int = 20,
+    prob_threshold: float = 0.05,
 ) -> Tuple[List[List[int]], torch.Tensor]:
     """ CTC prefix beam search inner implementation
 
@@ -243,11 +244,11 @@ def ctc_prefix_beam_search(
         filter_index = []
         for prob, idx in zip(top_k_probs.tolist(), top_k_index.tolist()):
             if keywords_tokenset is not None:
-                if prob > 0.05 and idx in keywords_tokenset:
+                if prob > prob_threshold and idx in keywords_tokenset:
                     filter_probs.append(prob)
                     filter_index.append(idx)
             else:
-                if prob > 0.05:
+                if prob > prob_threshold:
                     filter_probs.append(prob)
                     filter_index.append(idx)
 
