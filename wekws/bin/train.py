@@ -45,6 +45,10 @@ def get_args():
     parser.add_argument('--model_dir', required=True, help='save model dir')
     parser.add_argument('--seed', type=int, default=777, help='random seed')
     parser.add_argument('--checkpoint', help='checkpoint model')
+    parser.add_argument('--checkpoint_strict',
+                        default=True,
+                        type=lambda x: str(x).lower() == 'true',
+                        help='strictly load checkpoint (true/false)')
     parser.add_argument('--tensorboard_dir',
                         default='tensorboard',
                         help='tensorboard log dir')
@@ -172,7 +176,9 @@ def main():
     executor = Executor()
     # If specify checkpoint, load some info from checkpoint
     if args.checkpoint is not None:
-        infos = load_checkpoint(model, args.checkpoint)
+        infos = load_checkpoint(model,
+                                args.checkpoint,
+                                strict=args.checkpoint_strict)
     else:
         infos = {}
     start_epoch = infos.get('epoch', -1) + 1

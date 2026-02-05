@@ -16,6 +16,7 @@ gpu="0"
 batch_size=256
 num_workers=8
 keywords="嗨小问,你好问问"  # 在实际调用时会转换为 Unicode 转义
+dict_dir="dict"
 token_file="mobvoi_kws_transcription/tokens.txt"
 lexicon_file="mobvoi_kws_transcription/lexicon.txt"
 window_shift=50
@@ -101,6 +102,7 @@ python wekws/bin/score_ctc.py \
     --gpu "$first_gpu" \
     --batch_size "$batch_size" \
     --checkpoint "$checkpoint" \
+    --dict "$dict_dir" \
     --score_file "$score_file" \
     --num_workers "$num_workers" \
     --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee" \
@@ -126,6 +128,7 @@ python wekws/bin/compute_det_ctc.py \
     --window_shift "$window_shift" \
     --step 0.001 \
     --score_file "$score_file" \
+    --dict "$dict_dir" \
     --token_file "$token_file" \
     --lexicon_file "$lexicon_file"
 

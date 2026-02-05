@@ -26,6 +26,10 @@ config=conf/fsmn_ctc.yaml
 norm_mean=true
 norm_var=true
 gpus="0"
+dict_dir="dict"
+checkpoint_strict=true
+dict_auto_build=false
+dict_sorted_file="examples/hi_xiaowen/s0/dict/model_vocab_freq_asr_sorted.txt"
 
 checkpoint=
 target_exp_dir=exp/fsmn_ctc
@@ -104,6 +108,15 @@ else
   stop_stage_int=$(echo "$stop_stage" | awk '{print int($1)}')
 fi
 
+if $dict_auto_build; then
+  echo "Auto build dict from sorted vocab..."
+  mkdir -p "$dict_dir"
+  python tools/gen_reduced_dict.py \
+    --sorted_file "$dict_sorted_file" \
+    --num_keywords "$num_keywords" \
+    --output_dir "$dict_dir"
+fi
+
 if [ ${stage_int} -le -2 ] && [ ${stop_stage_int} -ge -2 ]; then
   echo "Download and extracte all datasets"
   local/mobvoi_data_download.sh --dl_dir $download_dir
@@ -124,7 +137,7 @@ if [ ${stage_int} -le -1 ] && [ ${stop_stage_int} -ge -1 ]; then
       mkdir -p data/${prefix}_$folder
       json_path=$download_dir/mobvoi_hotword_dataset_resources/${prefix}_$folder.json
       local/prepare_data.py $download_dir/mobvoi_hotword_dataset $json_path \
-        dict/dict.txt data/${prefix}_$folder
+        ${dict_dir}/dict.txt data/${prefix}_$folder
     done
     cat data/p_$folder/wav.scp data/n_$folder/wav.scp > data/$folder/wav.scp
     cat data/p_$folder/text data/n_$folder/text > data/$folder/text
@@ -145,11 +158,11 @@ if [ ${stage_int} -le -0 ] && [ ${stop_stage_int} -ge -0 ]; then
 
   # and we also copy the tokens and lexicon that used in
   # https://modelscope.cn/models/damo/speech_charctc_kws_phone-xiaoyun/summary
-  awk '{print $1, $2-1}' mobvoi_kws_transcription/tokens.txt > dict/dict.txt
-  sed -i 's/& 1/<filler> 1/' dict/dict.txt
-  echo '<SILENCE>' > dict/words.txt
-  echo '<EPS>' >> dict/words.txt
-  echo '<BLK>' >> dict/words.txt
+  awk '{print $1, $2-1}' mobvoi_kws_transcription/tokens.txt > ${dict_dir}/dict.txt
+  sed -i 's/& 1/<filler> 1/' ${dict_dir}/dict.txt
+  echo '<SILENCE>' > ${dict_dir}/words.txt
+  echo '<EPS>' >> ${dict_dir}/words.txt
+  echo '<BLK>' >> ${dict_dir}/words.txt
 fi
 
 if [ ${stage_int} -le 1 ] && [ ${stop_stage_int} -ge 1 ]; then
@@ -206,6 +219,8 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
       --model_dir $dir \
       --num_workers 8 \
       --num_keywords $num_keywords \
+      --dict $dict_dir \
+      --checkpoint_strict $checkpoint_strict \
       --min_duration 50 \
       --seed 666 \
       $cmvn_opts \

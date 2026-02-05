@@ -20,14 +20,33 @@ import yaml
 import torch
 
 
-def load_checkpoint(model: torch.nn.Module, path: str) -> dict:
+def load_checkpoint(model: torch.nn.Module,
+                    path: str,
+                    strict: bool = True) -> dict:
     if torch.cuda.is_available():
         logging.info('Checkpoint: loading from checkpoint %s for GPU' % path)
         checkpoint = torch.load(path)
     else:
         logging.info('Checkpoint: loading from checkpoint %s for CPU' % path)
         checkpoint = torch.load(path, map_location='cpu')
-    model.load_state_dict(checkpoint)
+    if not strict:
+        model_state = model.state_dict()
+        filtered = {}
+        mismatched = []
+        for k, v in checkpoint.items():
+            if k in model_state and model_state[k].shape == v.shape:
+                filtered[k] = v
+            else:
+                mismatched.append(k)
+        if mismatched:
+            logging.warning('Checkpoint: skipped mismatched keys: %s',
+                            mismatched)
+        checkpoint = filtered
+    result = model.load_state_dict(checkpoint, strict=strict)
+    if not strict and (result.missing_keys or result.unexpected_keys):
+        logging.warning('Checkpoint: missing keys: %s', result.missing_keys)
+        logging.warning('Checkpoint: unexpected keys: %s',
+                        result.unexpected_keys)
     info_path = re.sub('.pt$', '.yaml', path)
     configs = {}
     if os.path.exists(info_path):

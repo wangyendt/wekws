@@ -14,12 +14,19 @@
   `bash run_fsmn_ctc.sh --target_exp_dir exp/my_exp 2 2`
 - 指定 GPU：  
   `bash run_fsmn_ctc.sh --gpus "0,1,2,3" 2 2`
+- 自动按 `num_keywords` 生成词表：  
+  `bash run_fsmn_ctc.sh --target_exp_dir exp/fsmn_ctc_top1000 --gpus "0,1,2,3" --dict_dir dict_top1000 --num_keywords 1000 --dict_auto_build true --dict_sorted_file examples/hi_xiaowen/s0/dict/model_vocab_freq_asr_sorted.txt --checkpoint_strict false 2 2`
 - Stage 1.5（构建 metadata.db）：  
   `bash run_fsmn_ctc.sh 1.5 1.5`
 
 **关键参数**：
 - `--target_exp_dir`：实验输出目录
 - `--gpus`：GPU 列表（逗号分隔）
+- `--dict_dir`：词表目录（包含 `dict.txt`/`words.txt`）
+- `--num_keywords`：输出维度，需与词表大小一致
+- `--dict_auto_build`：训练前自动生成词表（true/false）
+- `--dict_sorted_file`：词频排序文件路径（用于自动生成词表）
+- `--checkpoint_strict`：是否严格加载 checkpoint（改词表时建议 `false`）
 - `stage/stop_stage`：控制流程阶段
 
 ## 2) 评测与单条推理
@@ -31,6 +38,9 @@
 ```bash
 bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/61.pt --dataset test --gpu 0
 ```
+
+**注意**：
+- 评测时需使用与训练一致的词表目录：`--dict_dir <词表目录>`
 
 **关键参数**：
 - `--checkpoint`（必填）：模型权重
@@ -187,4 +197,10 @@ python tools/analyze_asr_vocab.py \
 - `--config` 可自动推断 `output_dim`，`--output_dim` 会覆盖该值
 - `--vocab_file` 用于指定模型词表来源（如预训练模型的 `tokens.txt`）
 - 词表构建规则为：从 `tokens.txt` 中取 **id <= output_dim** 的所有 token
+
+## 实验管理注意事项（务必遵守）
+
+- 不直接修改 baseline 训练产物；所有实验使用单独的脚本/配置/词表文件
+- 如果只改词表，生成新的 `dict.txt`/`words.txt`（放到独立目录），训练脚本显式指向新词表
+- 需要改训练流程时，优先新建脚本（或带后缀命名的补丁脚本），不要覆盖原始脚本
 
