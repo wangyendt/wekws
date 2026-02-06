@@ -16,7 +16,7 @@ import os
 from typing import List, Tuple
 
 
-SPECIAL_TOKENS = {"<blk>", "<filler>", "<eps>"}
+SPECIAL_TOKENS = {"<blk>", "<filler>", "<eps>", "sil"}
 
 
 def parse_sorted(path: str) -> List[Tuple[int, int, str, float]]:
@@ -133,6 +133,7 @@ def main() -> None:
 
     # Write dict with reindexed ids
     with open(dict_path, "w", encoding="utf8") as f:
+        f.write("sil 0\n")
         f.write("<eps> -1\n")
         f.write("<blk> 0\n")
         f.write("<filler> 1\n")

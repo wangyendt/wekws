@@ -53,6 +53,27 @@ bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/61.pt --dataset test -
 
 ---
 
+### `examples/hi_xiaowen/s0/analyze_exp_test_stats.py`
+**用途**：汇总 `exp/**/test_N` 目录下的 `stats.*.txt`，输出两个唤醒词的准确率/误检率表格。
+
+**用法**：
+```bash
+python analyze_exp_test_stats.py --test-id 2
+python analyze_exp_test_stats.py --test-id 79
+```
+
+**常用参数**：
+- `--test-id`：指定 `test_N` 中的 N
+- `--target-fa-per-hour`：阈值选择上限（单位：次/小时），例如 12 小时一次可设 `1/12`
+- `--gen-stats`：当缺少 `stats.*.txt` 时，尝试用 `score.txt` 生成
+- `--label-file`：用于生成 stats 的 `data.list`，默认 `data/test/data.list`
+
+**输出说明**：
+- `accuracy`、`frr` 为百分比（保留 2 位小数）
+- `fa_per_hour` 为“每小时误检次数”（次/小时），**不**是百分比
+
+---
+
 ### `examples/hi_xiaowen/s0/infer_wav.sh`
 **用途**：单条 wav 或 utt_id 推理，输出 score / logits / decode。
 
