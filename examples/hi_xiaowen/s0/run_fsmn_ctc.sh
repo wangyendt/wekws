@@ -27,6 +27,7 @@ norm_mean=true
 norm_var=true
 gpus="0"
 dict_dir="dict"
+checkpoint_dict="dict"
 checkpoint_strict=true
 dict_auto_build=false
 dict_sorted_file="examples/hi_xiaowen/s0/dict/model_vocab_freq_asr_sorted.txt"
@@ -220,6 +221,7 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
       --num_workers 8 \
       --num_keywords $num_keywords \
       --dict $dict_dir \
+      --checkpoint_dict $checkpoint_dict \
       --checkpoint_strict $checkpoint_strict \
       --min_duration 50 \
       --seed 666 \

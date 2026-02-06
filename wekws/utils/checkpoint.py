@@ -15,14 +15,50 @@
 import logging
 import os
 import re
+from typing import Dict, Optional
 
 import yaml
 import torch
 
 
+def _parse_dict(dict_path: str) -> Dict[str, int]:
+    """Parse dict.txt and return {token: id} mapping (only id >= 0)."""
+    tok2id: Dict[str, int] = {}
+    with open(dict_path, 'r', encoding='utf8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            tok = parts[0]
+            try:
+                idx = int(parts[-1])
+            except ValueError:
+                continue
+            if idx >= 0:
+                tok2id[tok] = idx
+    return tok2id
+
+
+def _build_id_map(old_dict_path: str,
+                  new_dict_path: str) -> Dict[int, int]:
+    """Build {new_id: old_id} mapping by matching token strings."""
+    old_tok2id = _parse_dict(old_dict_path)
+    new_tok2id = _parse_dict(new_dict_path)
+    id_map: Dict[int, int] = {}
+    for tok, new_id in new_tok2id.items():
+        if tok in old_tok2id:
+            id_map[new_id] = old_tok2id[tok]
+    return id_map
+
+
 def load_checkpoint(model: torch.nn.Module,
                     path: str,
-                    strict: bool = True) -> dict:
+                    strict: bool = True,
+                    old_dict_dir: Optional[str] = None,
+                    new_dict_dir: Optional[str] = None) -> dict:
     if torch.cuda.is_available():
         logging.info('Checkpoint: loading from checkpoint %s for GPU' % path)
         checkpoint = torch.load(path)
@@ -38,6 +74,34 @@ def load_checkpoint(model: torch.nn.Module,
                 filtered[k] = v
             else:
                 mismatched.append(k)
+
+        # Weight surgery: copy matching rows from pretrained output layer
+        if (mismatched and old_dict_dir and new_dict_dir
+                and old_dict_dir != new_dict_dir):
+            old_dict_path = os.path.join(old_dict_dir, 'dict.txt')
+            new_dict_path = os.path.join(new_dict_dir, 'dict.txt')
+            if (os.path.exists(old_dict_path)
+                    and os.path.exists(new_dict_path)):
+                id_map = _build_id_map(old_dict_path, new_dict_path)
+                if id_map:
+                    surgery_keys = [k for k in mismatched
+                                    if 'out_linear2' in k]
+                    for k in surgery_keys:
+                        old_param = checkpoint[k]
+                        new_param = model_state[k].clone()
+                        copied = 0
+                        for new_id, old_id in id_map.items():
+                            if (old_id < old_param.shape[0]
+                                    and new_id < new_param.shape[0]):
+                                new_param[new_id] = old_param[old_id]
+                                copied += 1
+                        filtered[k] = new_param
+                        mismatched.remove(k)
+                        logging.info(
+                            'Weight surgery: %s, copied %d/%d rows '
+                            'from pretrained checkpoint', k, copied,
+                            new_param.shape[0])
+
         if mismatched:
             logging.warning('Checkpoint: skipped mismatched keys: %s',
                             mismatched)

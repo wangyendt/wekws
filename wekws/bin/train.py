@@ -85,6 +85,11 @@ def get_args():
                         help='prefetch number')
     parser.add_argument('--reverb_lmdb', default=None, help='reverb lmdb file')
     parser.add_argument('--noise_lmdb', default=None, help='noise lmdb file')
+    parser.add_argument('--checkpoint_dict',
+                        default='dict',
+                        help='dict dir of the pretrained checkpoint '
+                             '(for weight surgery)')
+
 
     args = parser.parse_args()
     return args
@@ -178,7 +183,9 @@ def main():
     if args.checkpoint is not None:
         infos = load_checkpoint(model,
                                 args.checkpoint,
-                                strict=args.checkpoint_strict)
+                                strict=args.checkpoint_strict,
+                                old_dict_dir=args.checkpoint_dict,
+                                new_dict_dir=args.dict)
     else:
         infos = {}
     start_epoch = infos.get('epoch', -1) + 1
