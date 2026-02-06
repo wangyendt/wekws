@@ -249,6 +249,7 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
     --gpu 0  \
     --batch_size 256 \
     --checkpoint $score_checkpoint \
+    --dict $dict_dir \
     --score_file $result_dir/score.txt  \
     --num_workers 8  \
     --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee" \
@@ -261,6 +262,7 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
       --window_shift $window_shift \
       --step 0.001  \
       --score_file $result_dir/score.txt \
+      --dict $dict_dir \
       --token_file data/tokens.txt \
       --lexicon_file data/lexicon.txt
 fi
