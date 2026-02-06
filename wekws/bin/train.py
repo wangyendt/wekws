@@ -161,8 +161,15 @@ def main():
             data = yaml.dump(configs)
             fout.write(data)
         print(model)
-    num_params = count_parameters(model)
-    print('the number of model params: {}'.format(num_params))
+    # 统计参数量（详细信息）
+    from wekws.utils.train_utils import count_parameters_detailed
+    param_details = count_parameters_detailed(model)
+    print('=' * 50)
+    print('Model Parameters:')
+    print('  - Backbone params:  {:,}'.format(param_details['backbone']))
+    print('  - Head params:      {:,}'.format(param_details['head']))
+    print('  - Total params:     {:,}'.format(param_details['total']))
+    print('=' * 50)
 
     # !!!IMPORTANT!!!
     # Try to export the model by script, if fails, we should refine

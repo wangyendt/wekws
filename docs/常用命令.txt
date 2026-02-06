@@ -6,6 +6,7 @@ bash run_fsmn_ctc.sh --target_exp_dir exp/fsmn_ctc_top440 --gpus 0,1,2,3 --dict_
 
 bash run_fsmn_ctc.sh --target_exp_dir exp/fsmn_ctc_top2598_weight_surgery --gpus 0,1,2,3 --dict_dir dict_top2598 --num_keywords 2598 --dict_auto_build true --dict_sorted_file dict/model_vocab_freq_asr_sorted.txt --checkpoint_strict false 2 2
 bash run_fsmn_ctc.sh --target_exp_dir exp/fsmn_ctc_top440_weight_surgery --gpus 0,1,2,3 --dict_dir dict_top440 --num_keywords 440 --dict_auto_build true --dict_sorted_file dict/model_vocab_freq_asr_sorted.txt --checkpoint_strict false 2 2
+bash run_fsmn_ctc.sh --target_exp_dir exp/fsmn_ctc_top20_weight_surgery --gpus 0,1,2,3 --dict_dir dict_top20 --num_keywords 20 --dict_auto_build true --dict_sorted_file dict/model_vocab_freq_asr_sorted.txt --checkpoint_strict false 2 2
 
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_top440/7.pt --gpu "0,1,2,3" --dict_dir dict_top440
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_top2598/79.pt --dict_dir dict_top2598 --dataset test --gpu 1

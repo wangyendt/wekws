@@ -28,3 +28,33 @@ def set_mannul_seed(seed):
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def count_parameters_detailed(model):
+    """
+    统计模型参数量的详细信息，分别统计 backbone 和 head（out_linear2）的参数量
+    
+    Returns:
+        dict: 包含 'backbone', 'head', 'total' 三个键的字典
+    """
+    total_params = 0
+    backbone_params = 0
+    head_params = 0
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            param_count = param.numel()
+            total_params += param_count
+            
+            # 判断是否属于输出层（head）
+            # out_linear2 是最终的输出层
+            if 'out_linear2' in name:
+                head_params += param_count
+            else:
+                backbone_params += param_count
+    
+    return {
+        'backbone': backbone_params,
+        'head': head_params,
+        'total': total_params
+    }
