@@ -128,6 +128,9 @@ def load_stats_file(stats_file):
     values = []
     with open(stats_file, 'r', encoding='utf8') as fin:
         for line in fin:
+            # 跳过注释行（以 # 开头）
+            if line.strip().startswith('#'):
+                continue
             arr = line.strip().split()
             threshold, fa_per_hour, frr = arr
             values.append([float(fa_per_hour), float(frr) * 100])
@@ -249,6 +252,11 @@ if __name__ == '__main__':
         stats_file = os.path.join(
             stats_dir, 'stats.' + keyword.replace(' ', '_') + '.txt')
         with open(stats_file, 'w', encoding='utf8') as fout:
+            # 写入表头
+            fout.write('# threshold fa_per_hour frr\n')
+            fout.write('# 第一列: 阈值 (0.000-1.000)\n')
+            fout.write('# 第二列: 误唤醒率 (每小时误唤醒次数)\n')
+            fout.write('# 第三列: 拒真率 FRR (False Rejection Rate, 1-召回率)\n')
             threshold = 0.0
             while threshold <= 1.0:
                 num_false_reject = 0

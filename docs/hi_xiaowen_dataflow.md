@@ -282,3 +282,36 @@ tokenizer = CharTokenizer(
 
 - **“CTC decode 输出 m×1？”**  
   可以理解为 **长度为 m 的 token 序列**。m 不固定。
+
+- **"stats.txt 第二列是百分比？"**  
+  不是。第二列是**每小时误唤醒次数**（绝对值），第三列才是比例（拒真率 FRR）。
+
+## 9) stats.*.txt 评测结果文件格式
+
+`compute_det_ctc.py` 生成的 `stats.<关键词>.txt` 文件格式为：
+
+```
+# threshold fa_per_hour frr
+# 第一列: 阈值 (0.000-1.000)
+# 第二列: 误唤醒率 (每小时误唤醒次数)
+# 第三列: 拒真率 FRR (False Rejection Rate, 1-召回率)
+0.000 0.699521 0.015976
+0.001 0.699521 0.015976
+0.002 0.699521 0.015976
+...
+```
+
+**各列含义**：
+- **第一列 `threshold`**：检测阈值，范围 0.000-1.000，步长由 `--step` 参数指定（默认 0.001）
+- **第二列 `fa_per_hour`**：误唤醒率，单位为"每小时误唤醒次数"（False Alarm Per Hour）
+  - 计算方式：`num_false_alarm / (filler_dur / 3600.0)`
+  - 越低越好，例如 0.70 表示每小时误唤醒 0.7 次
+- **第三列 `frr`**：拒真率（False Rejection Rate），范围 0.0-1.0
+  - 计算方式：`num_false_reject / keyword_num`
+  - 表示正样本中未被检出的比例
+  - 等价于 `1 - 召回率`，越低越好
+  - 例如 0.015976 表示 1.6% 的正样本被拒绝
+
+**注意**：
+- 文件以 `#` 开头的行为注释，会被读取脚本自动跳过
+- `analyze_exp_test_stats.py` 会从此文件中选择最优阈值点，计算 `accuracy = 1.0 - frr`

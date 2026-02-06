@@ -23,6 +23,9 @@ def load_stats_file(stats_file):
     values = []
     with open(stats_file, 'r', encoding='utf8') as fin:
         for line in fin:
+            # 跳过注释行（以 # 开头）
+            if line.strip().startswith('#'):
+                continue
             arr = line.strip().split()
             threshold, fa_per_hour, frr = arr
             values.append([float(fa_per_hour), float(frr) * 100])

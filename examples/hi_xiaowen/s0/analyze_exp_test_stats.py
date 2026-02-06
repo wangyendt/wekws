@@ -18,6 +18,9 @@ def parse_stats_file(path: str) -> List[StatRow]:
     rows: List[StatRow] = []
     with open(path, "r", encoding="utf-8") as fin:
         for line in fin:
+            # 跳过注释行（以 # 开头）
+            if line.strip().startswith("#"):
+                continue
             parts = line.strip().split()
             if len(parts) < 3:
                 continue
