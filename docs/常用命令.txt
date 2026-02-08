@@ -12,9 +12,11 @@ bash run_fsmn_ctc.sh --target_exp_dir exp/fsmn_ctc_top20_weight_surgery --gpus 0
 # 知识蒸馏
 bash ./run_distill.sh 2 3
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top440_weight_surgery/79.pt --dict_dir dict_top440 --num_keywords 440 --target_exp_dir exp/fsmn_ctc_distill_mini_440 --init_from_teacher true 2 3
+bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_baseline_4gpus/79.pt --dict_dir dict --num_keywords 2599 --target_exp_dir exp/fsmn_ctc_distill_mini_2599_baseline --init_from_teacher true 2 3
+bash ./run_bash_delay.sh --cmd "bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_baseline_4gpus/79.pt --dict_dir dict --num_keywords 2599 --target_exp_dir exp/fsmn_ctc_distill_mini_2599_baseline --init_from_teacher true 2 3"
 
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --gpu "0,1,2,3" --dict_dir dict_top20
-bash ./evaluate.sh --checkpoint exp/fsmn_ctc_top440/7.pt --gpu "0,1,2,3" --dict_dir dict_top440
+bash ./evaluate.sh --checkpoint exp/fsmn_ctc_top440/79.pt --gpu "0,1,2,3" --dict_dir dict_top440
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_top2598/79.pt --dict_dir dict_top2598 --dataset test --gpu 1
 
 python analyze_exp_test_stats.py --test-id 2
