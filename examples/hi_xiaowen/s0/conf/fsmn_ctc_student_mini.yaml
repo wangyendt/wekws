@@ -1,7 +1,12 @@
-# FSMN-mini 学生网络配置（用于知识蒸馏）
-# 相比教师网络 (4层, 250/128, ~392K)，参数缩减到 ~138K
-# backbone: num_layers 4->3, linear_dim 250->160, proj_dim 128->64,
-#           input_affine_dim 140->96, output_affine_dim 140->96
+# FSMN-mini 学生网络配置（用于 feature alignment 蒸馏）
+# 相比教师网络 (4层, 250/128, backbone ~390K)，backbone 参数缩减到 ~197K
+# 关键：linear_dim=250 和 output_affine_dim=140 必须与教师一致，
+#       以便直接复用教师的 HEAD (out_linear1 + out_linear2)
+# backbone: num_layers 4->3, proj_dim 128->64, input_affine_dim 140->96
+# 参数量：
+#   in_linear1(400->96): 38,496  in_linear2(96->250): 24,250
+#   3x FSMN block(250/64): 99,054  out_linear1(250->140, from teacher): 35,140
+#   backbone total: ~197K  HEAD: depends on teacher vocab size
 
 dataset_conf:
     filter_conf:
@@ -47,13 +52,13 @@ model:
         type: fsmn
         input_affine_dim: 96
         num_layers: 3
-        linear_dim: 160
+        linear_dim: 250
         proj_dim: 64
         left_order: 10
         right_order: 2
         left_stride: 1
         right_stride: 1
-        output_affine_dim: 96
+        output_affine_dim: 140
     classifier:
         type: identity
         dropout: 0.1
@@ -68,6 +73,6 @@ optim_conf:
 
 training_config:
     grad_clip: 5
-    max_epoch: 80
+    max_epoch: 120
     log_interval: 10
     criterion: ctc

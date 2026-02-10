@@ -75,6 +75,30 @@ class KWSModel(nn.Module):
         x = self.activation(x)
         return x, out_cache
 
+    def forward_with_block_outputs(
+        self,
+        x: torch.Tensor,
+        in_cache: torch.Tensor = torch.zeros(0, 0, 0, dtype=torch.float)
+    ) -> Tuple[torch.Tensor, torch.Tensor, list]:
+        """Forward pass that also returns intermediate block outputs.
+
+        Used for feature alignment distillation where the student learns
+        to match the teacher's block-level features via MSE loss.
+
+        Returns:
+            logits: (B, T, output_dim)
+            out_cache: cache tensor
+            block_outputs: list of (B, T, linear_dim) tensors per FSMN block
+        """
+        if self.global_cmvn is not None:
+            x = self.global_cmvn(x)
+        x = self.preprocessing(x)
+        x, out_cache, block_outputs = \
+            self.backbone.forward_with_block_outputs(x, in_cache)
+        x = self.classifier(x)
+        x = self.activation(x)
+        return x, out_cache, block_outputs
+
     def forward_softmax(
         self,
         x: torch.Tensor,

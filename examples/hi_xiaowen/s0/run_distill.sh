@@ -1,14 +1,45 @@
 #!/bin/bash
 # Copyright 2026 Wayne
 #
-# 知识蒸馏训练脚本：用教师模型（FSMN top20）蒸馏训练学生模型（FSMN-mini）
+# Feature Alignment 蒸馏训练脚本：用教师模型的 block 特征指导学生 backbone 学习，
+# 并复用教师的 HEAD (out_linear1 + out_linear2)。
+#
+# 两阶段训练：
+#   Phase 1 (align_epochs):    纯 MSE feature alignment，HEAD 冻结
+#   Phase 2 (finetune_epochs): MSE + CTC 混合，HEAD 解冻（极低学习率）
 #
 # 用法示例（选项参数必须放在位置参数之前）:
-#   bash run_distill.sh 2 2                                             # Stage 2: 蒸馏训练
-#   bash run_distill.sh 3 3                                             # Stage 3: 模型平均 + 评测
-#   bash run_distill.sh 2 3                                             # Stage 2+3: 蒸馏训练 + 评测
-#   bash run_distill.sh --gpus "0,1" --kd_temperature 4.0 2 3         # 自定义参数
-#   bash run_distill.sh --teacher_checkpoint exp/xxx/79.pt 2 3        # 指定教师模型
+#
+#   # 使用 top20 教师蒸馏（默认）
+#   bash run_distill.sh 2 3
+#
+#   # 使用 top440 教师蒸馏
+#   bash run_distill.sh \
+#     --teacher_checkpoint exp/fsmn_ctc_top440_weight_surgery/79.pt \
+#     --num_keywords 440 \
+#     --dict_dir dict_top440 \
+#     --target_exp_dir exp/fsmn_ctc_distill_mini_align_440 \
+#     2 3
+#
+#   # 使用 baseline 2599 教师蒸馏
+#   bash run_distill.sh \
+#     --teacher_checkpoint exp/fsmn_ctc_baseline_4gpus/79.pt \
+#     --num_keywords 2599 \
+#     --dict_dir dict \
+#     --target_exp_dir exp/fsmn_ctc_distill_mini_align_2599 \
+#     2 3
+#
+#   # 自定义训练参数
+#   bash run_distill.sh --gpus "0,1" --align_epochs 80 --finetune_epochs 30 2 3
+#
+#   # 从某个学生 checkpoint 继续训练（并可重置学习率）
+#   bash run_distill.sh \
+#     --checkpoint exp/fsmn_ctc_distill_mini_align_20/79.pt \
+#     --resume_lr 0.001 \
+#     --align_epochs 200 --finetune_epochs 50 \
+#     --finetune_lr 0.0001 \
+#     --target_exp_dir exp/fsmn_ctc_distill_mini_align_20_more \
+#     2 2
 #
 # 日志文件会自动保存到: <target_exp_dir>/logs/run_distill_stage_<stage>_<stop_stage>_<timestamp>.log
 
@@ -32,8 +63,14 @@ student_config=conf/fsmn_ctc_student_mini.yaml
 num_keywords=20
 dict_dir="dict_top20"
 
+# ---- 断点继续训练 ----
+# student checkpoint to resume (e.g. exp/fsmn_ctc_distill_mini_align_20/79.pt)
+checkpoint=
+# override lr when resuming from --checkpoint (e.g. 0.001)
+resume_lr=
+
 # ---- 实验目录 ----
-target_exp_dir=exp/fsmn_ctc_distill_mini
+target_exp_dir=exp/fsmn_ctc_distill_mini_align
 
 # ---- 训练参数 ----
 gpus="0,1,2,3"
@@ -41,13 +78,24 @@ norm_mean=true
 norm_var=true
 seed=666
 
-# ---- 蒸馏参数 ----
-kd_temperature=2.0
-kd_lambda_init=0.7
-kd_lambda_final=0.5
-kd_lambda_switch_epoch=20
-finetune_epochs=10
-init_from_teacher=false
+# ---- 学习率调度（train_distill.py）----
+# 默认: scheduler 只在 finetune 阶段生效（scheduler_start_epoch=-1 -> align_epochs）
+lr_scheduler=plateau
+scheduler_start_epoch=-1
+plateau_factor=0.5
+plateau_patience=3
+plateau_threshold=0.01
+plateau_min_lr=1e-6
+plateau_cooldown=0
+
+# ---- Feature Alignment 蒸馏参数 ----
+align_epochs=100
+finetune_epochs=20
+finetune_lr=
+head_lr_ratio=0.01
+finetune_mse_weight_start=0.5
+finetune_mse_weight_end=0.1
+layer_mapping="0:1,1:2,2:3"
 
 # ---- 评测参数 ----
 average_model=true
@@ -82,13 +130,13 @@ log_file=$log_dir/run_distill_stage_${stage}_${stop_stage}_${timestamp}.log
 
 # 如果还没有重定向到 tee（避免递归）
 if [ -z "$LOG_REDIRECT_DONE" ]; then
-  echo "📝 实验目录: $dir"
-  echo "📝 日志文件: $log_file"
+  echo "实验目录: $dir"
+  echo "日志文件: $log_file"
   echo "================================================"
   export LOG_REDIRECT_DONE=1
   exec > >(tee -a "$log_file") 2>&1
   echo "================================================"
-  echo "🚀 开始运行: $(date)"
+  echo "开始运行: $(date)"
   echo "   命令: bash $0 $original_args"
   echo "   Stage: $stage -> $stop_stage"
   echo "   实验目录: $dir"
@@ -100,52 +148,61 @@ stage_int=$(echo "$stage" | awk '{print int($1)}')
 stop_stage_int=$(echo "$stop_stage" | awk '{print int($1)}')
 
 # ================================================================
-# Stage 2: 蒸馏训练
+# Stage 2: Feature Alignment 蒸馏训练
 # ================================================================
 if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   echo ""
   echo "================================================"
-  echo "🎓 Stage 2: 知识蒸馏训练"
+  echo "Stage 2: Feature Alignment 蒸馏训练"
   echo "================================================"
-  echo "教师模型:       $teacher_checkpoint"
-  echo "教师配置:       ${teacher_config:-auto}"
-  echo "学生配置:       $student_config"
-  echo "词表目录:       $dict_dir"
-  echo "输出关键词数:   $num_keywords"
-  echo "蒸馏温度 T:     $kd_temperature"
-  echo "Lambda 初始:    $kd_lambda_init"
-  echo "Lambda 后期:    $kd_lambda_final"
-  echo "Lambda 切换:    epoch $kd_lambda_switch_epoch"
-  echo "纯CTC收尾:     最后 $finetune_epochs epoch"
-  echo "教师权重初始化: $init_from_teacher"
-  echo "GPU:            $gpus"
+  echo "教师模型:           $teacher_checkpoint"
+  echo "教师配置:           ${teacher_config:-auto}"
+  echo "学生配置:           $student_config"
+  echo "词表目录:           $dict_dir"
+  echo "输出关键词数:       $num_keywords"
+  echo "Phase 1 对齐 epoch: $align_epochs"
+  echo "Phase 2 微调 epoch: $finetune_epochs"
+  echo "Finetune lr:        ${finetune_lr:-keep}"
+  echo "HEAD lr ratio:      $head_lr_ratio"
+  echo "微调 MSE weight:    $finetune_mse_weight_start -> $finetune_mse_weight_end"
+  echo "Layer mapping:      $layer_mapping"
+  echo "Resume checkpoint:  ${checkpoint:-none}"
+  echo "Resume lr override: ${resume_lr:-none}"
+  echo "LR scheduler:       $lr_scheduler"
+  echo "Scheduler start:    $scheduler_start_epoch"
+  echo "Plateau factor:     $plateau_factor"
+  echo "Plateau patience:   $plateau_patience"
+  echo "Plateau threshold:  $plateau_threshold"
+  echo "Plateau min lr:     $plateau_min_lr"
+  echo "Plateau cooldown:   $plateau_cooldown"
+  echo "GPU:                $gpus"
   echo "================================================"
   echo ""
 
   # 检查教师模型文件
   if [ ! -f "$teacher_checkpoint" ]; then
-    echo "❌ 错误: 教师模型文件不存在: $teacher_checkpoint"
+    echo "错误: 教师模型文件不存在: $teacher_checkpoint"
     exit 1
   fi
 
   # 检查学生配置
   if [ ! -f "$student_config" ]; then
-    echo "❌ 错误: 学生配置文件不存在: $student_config"
+    echo "错误: 学生配置文件不存在: $student_config"
     exit 1
   fi
 
   # 检查 CMVN 文件
   if [ ! -f data/global_cmvn.kaldi ]; then
-    echo "⚠️  CMVN 文件不存在，尝试从预训练模型复制..."
+    echo "CMVN 文件不存在，尝试从预训练模型复制..."
     if [ -f speech_charctc_kws_phone-xiaoyun/train/feature_transform.txt.80dim-l2r2 ]; then
       cp speech_charctc_kws_phone-xiaoyun/train/feature_transform.txt.80dim-l2r2 data/global_cmvn.kaldi
     else
-      echo "❌ 错误: 无法找到 CMVN 文件"
+      echo "错误: 无法找到 CMVN 文件"
       exit 1
     fi
   fi
 
-  echo "开始蒸馏训练 ..."
+  echo "开始 Feature Alignment 蒸馏训练 ..."
   mkdir -p $dir
 
   cmvn_opts=
@@ -159,6 +216,19 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
     teacher_config_opt="--teacher_config $teacher_config"
   fi
 
+  checkpoint_opt=
+  if [ -n "$checkpoint" ]; then
+    checkpoint_opt="--checkpoint $checkpoint"
+  fi
+  resume_lr_opt=
+  if [ -n "$resume_lr" ]; then
+    resume_lr_opt="--resume_lr $resume_lr"
+  fi
+  finetune_lr_opt=
+  if [ -n "$finetune_lr" ]; then
+    finetune_lr_opt="--finetune_lr $finetune_lr"
+  fi
+
   python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$num_gpus \
     wekws/bin/train_distill.py --gpus $gpus \
       --config $student_config \
@@ -170,22 +240,32 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
       --dict $dict_dir \
       --min_duration 50 \
       --seed $seed \
+      $checkpoint_opt \
+      $resume_lr_opt \
+      $finetune_lr_opt \
+      --lr_scheduler $lr_scheduler \
+      --scheduler_start_epoch $scheduler_start_epoch \
+      --plateau_factor $plateau_factor \
+      --plateau_patience $plateau_patience \
+      --plateau_threshold $plateau_threshold \
+      --plateau_min_lr $plateau_min_lr \
+      --plateau_cooldown $plateau_cooldown \
       --teacher_checkpoint $teacher_checkpoint \
       $teacher_config_opt \
-      --kd_temperature $kd_temperature \
-      --kd_lambda_init $kd_lambda_init \
-      --kd_lambda_final $kd_lambda_final \
-      --kd_lambda_switch_epoch $kd_lambda_switch_epoch \
+      --align_epochs $align_epochs \
       --finetune_epochs $finetune_epochs \
-      --init_from_teacher $init_from_teacher \
+      --head_lr_ratio $head_lr_ratio \
+      --finetune_mse_weight_start $finetune_mse_weight_start \
+      --finetune_mse_weight_end $finetune_mse_weight_end \
+      --layer_mapping "$layer_mapping" \
       $cmvn_opts
 
   if [ $? -ne 0 ]; then
-    echo "❌ 蒸馏训练失败！"
+    echo "蒸馏训练失败！"
     exit 1
   fi
   echo ""
-  echo "✅ Stage 2 蒸馏训练完成！"
+  echo "Stage 2 蒸馏训练完成！"
 fi
 
 
@@ -195,7 +275,7 @@ fi
 if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
   echo ""
   echo "================================================"
-  echo "📊 Stage 3: 模型平均 + 评测"
+  echo "Stage 3: 模型平均 + 评测"
   echo "================================================"
   echo ""
 
@@ -208,7 +288,7 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
       --val_best
 
     if [ $? -ne 0 ]; then
-      echo "❌ 模型平均失败！"
+      echo "模型平均失败！"
       exit 1
     fi
   fi
@@ -226,18 +306,18 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
     --dict $dict_dir \
     --score_file $result_dir/score.txt \
     --num_workers 8 \
-    --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee" \
+    --keywords "嗨小问,你好问问" \
     --token_file $token_file \
     --lexicon_file $lexicon_file
 
   if [ $? -ne 0 ]; then
-    echo "❌ 推理失败！"
+    echo "推理失败！"
     exit 1
   fi
 
   echo "计算 DET 曲线..."
   python wekws/bin/compute_det_ctc.py \
-    --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee" \
+    --keywords "嗨小问,你好问问" \
     --test_data data/test/data.list \
     --window_shift $window_shift \
     --step 0.001 \
@@ -247,12 +327,12 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
     --lexicon_file $lexicon_file
 
   if [ $? -ne 0 ]; then
-    echo "❌ DET 计算失败！"
+    echo "DET 计算失败！"
     exit 1
   fi
 
   echo ""
-  echo "✅ Stage 3 评测完成！结果保存在: $result_dir"
+  echo "Stage 3 评测完成！结果保存在: $result_dir"
 fi
 
 
@@ -260,7 +340,7 @@ fi
 if [ -n "$LOG_REDIRECT_DONE" ]; then
   echo ""
   echo "================================================"
-  echo "✅ 运行完成: $(date)"
+  echo "运行完成: $(date)"
   echo "   实验目录: $dir"
   echo "   日志文件: $log_file"
   echo "================================================"

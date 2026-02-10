@@ -494,6 +494,48 @@ class FSMN(nn.Module):
         # return x7, None
         return x7, torch.cat(in_cache, dim=-1)
 
+    def forward_with_block_outputs(
+        self,
+        input: torch.Tensor,
+        in_cache: torch.Tensor = torch.zeros(0, 0, 0, dtype=torch.float)
+    ) -> Tuple[torch.Tensor, torch.Tensor, list]:
+        """Forward pass that also returns intermediate FSMN block outputs.
+
+        This is used for feature alignment distillation, where the student
+        learns to match the teacher's block-level features via MSE loss.
+
+        Args:
+            input (torch.Tensor): Input tensor (B, T, D)
+            in_cache (torch.Tensor): (B, D, C), C is the accumulated cache size
+
+        Returns:
+            logits: (B, T, output_dim)
+            out_cache: concatenated cache tensor
+            block_outputs: list of tensors, one per FSMN block, each (B, T, linear_dim)
+        """
+        if in_cache is None or len(in_cache) == 0:
+            in_cache = [
+                torch.zeros(0, 0, 0, 0, dtype=torch.float)
+                for _ in range(len(self.fsmn))
+            ]
+        else:
+            in_cache = [
+                in_cache[:, :, :, i:i + 1] for i in range(in_cache.size(-1))
+            ]
+        input = (input, in_cache)
+        x1 = self.in_linear1(input)
+        x2 = self.in_linear2(x1)
+        x3 = self.relu(x2)
+        x4, _ = x3
+        block_outputs = []
+        for layer, module in enumerate(self.fsmn):
+            x4, in_cache[layer] = module((x4, in_cache[layer]))
+            block_outputs.append(x4)
+        x5 = self.out_linear1(x4)
+        x6 = self.out_linear2(x5)
+        x7, _ = x6
+        return x7, torch.cat(in_cache, dim=-1), block_outputs
+
     def to_kaldi_net(self):
         re_str = ''
         re_str += '<Nnet>\n'
