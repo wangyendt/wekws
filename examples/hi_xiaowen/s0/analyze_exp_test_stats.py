@@ -35,15 +35,42 @@ def parse_stats_file(path: str) -> List[StatRow]:
     return rows
 
 
-def pick_best_row(rows: List[StatRow], target_fa: float) -> Tuple[Optional[StatRow], str]:
+def pick_best_row(
+    rows: List[StatRow],
+    target_fa: float,
+    pick_mode: str = "legacy",
+    frr_eps: float = 0.001,
+) -> Tuple[Optional[StatRow], str]:
     if not rows:
         return None, "no_data"
     candidates = [r for r in rows if r.fa_per_hour <= target_fa]
-    if candidates:
-        best = min(candidates, key=lambda r: (r.frr, r.fa_per_hour, r.threshold))
-        return best, f"fa<=target({target_fa})"
-    best = min(rows, key=lambda r: (r.frr, r.fa_per_hour, r.threshold))
-    return best, "min_frr_overall"
+
+    if pick_mode == "legacy":
+        if candidates:
+            best = min(candidates, key=lambda r: (r.frr, r.fa_per_hour, r.threshold))
+            return best, f"legacy:fa<=target({target_fa})"
+        best = min(rows, key=lambda r: (r.frr, r.fa_per_hour, r.threshold))
+        return best, "legacy:min_frr_overall"
+
+    if pick_mode == "recall":
+        if candidates:
+            # 极致召回：先最小 FRR，再尽量把 FA 用满到 target 附近（从下方逼近）
+            best = min(candidates, key=lambda r: (r.frr, target_fa - r.fa_per_hour, r.threshold))
+            return best, f"recall:min_frr_then_fa_close_to_target({target_fa})"
+        best = min(rows, key=lambda r: (r.frr, r.fa_per_hour, r.threshold))
+        return best, "recall:min_frr_overall(no_fa_candidate)"
+
+    if pick_mode == "robust":
+        if candidates:
+            best_frr = min(r.frr for r in candidates)
+            robust_set = [r for r in candidates if r.frr <= best_frr + frr_eps]
+            # 量产稳健：在 FRR 几乎不变的前提下，选择更高阈值以换更稳的 FA
+            best = max(robust_set, key=lambda r: (r.threshold, r.fa_per_hour))
+            return best, f"robust:frr<=min+{frr_eps}_then_max_threshold"
+        best = min(rows, key=lambda r: (r.frr, r.fa_per_hour, r.threshold))
+        return best, "robust:min_frr_overall(no_fa_candidate)"
+
+    raise ValueError(f"unsupported pick_mode: {pick_mode}")
 
 
 def keyword_from_stats_filename(filename: str) -> Optional[str]:
@@ -59,6 +86,13 @@ def find_test_dirs(exp_dir: str, test_name: str) -> List[str]:
         if os.path.basename(root) == test_name:
             results.append(root)
     return sorted(results)
+
+
+def normalize_test_name(test_id: str) -> str:
+    test_id = test_id.strip()
+    if test_id.startswith("test_"):
+        return test_id
+    return f"test_{test_id}"
 
 
 def fmt_percent(value: float) -> str:
@@ -138,9 +172,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--test-id",
-        type=int,
-        default=2,
-        help="测试集编号，例如 test_2 中的 2",
+        type=str,
+        default="2",
+        help="测试集编号，例如 2 / 229_int8，或直接传 test_229_int8",
     )
     parser.add_argument(
         "--target-fa-per-hour",
@@ -190,9 +224,27 @@ def main() -> int:
         default=0.001,
         help="threshold step（用于生成 stats）",
     )
+    parser.add_argument(
+        "--pick-mode",
+        type=str,
+        default="legacy",
+        choices=["legacy", "recall", "robust"],
+        help=(
+            "阈值选择策略: "
+            "legacy=现有逻辑(min(frr,fa,th))；"
+            "recall=极致召回(先 min frr，再让 fa 逼近 target)；"
+            "robust=量产稳健(FRR 容差内选最大阈值)"
+        ),
+    )
+    parser.add_argument(
+        "--frr-eps",
+        type=float,
+        default=0.001,
+        help="robust 模式下 FRR 容差，保留 frr<=min_frr+frr_eps 的点",
+    )
     args = parser.parse_args()
 
-    test_name = f"test_{args.test_id}"
+    test_name = normalize_test_name(args.test_id)
     exp_dir = args.exp_dir
     test_dirs = find_test_dirs(exp_dir, test_name)
 
@@ -251,7 +303,12 @@ def main() -> int:
             if not keyword:
                 continue
             rows = parse_stats_file(stats_file)
-            best, picked_by = pick_best_row(rows, args.target_fa_per_hour)
+            best, picked_by = pick_best_row(
+                rows,
+                target_fa=args.target_fa_per_hour,
+                pick_mode=args.pick_mode,
+                frr_eps=args.frr_eps,
+            )
             if not best:
                 continue
             accuracy = 1.0 - best.frr

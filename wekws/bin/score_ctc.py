@@ -47,7 +47,17 @@ def get_args():
                         type=int,
                         default=-1,
                         help='gpu id for this rank, -1 for cpu')
-    parser.add_argument('--checkpoint', required=True, help='checkpoint model')
+    parser.add_argument('--checkpoint',
+                        default='',
+                        help='checkpoint model (.pt/.zip), optional when --executorch_model is set')
+    parser.add_argument('--executorch_model',
+                        type=str,
+                        default='',
+                        help='ExecuTorch .pte model path')
+    parser.add_argument('--executorch_seq_len',
+                        type=int,
+                        default=100,
+                        help='Static sequence length expected by ExecuTorch model')
     parser.add_argument('--batch_size',
                         default=16,
                         type=int,
@@ -203,11 +213,49 @@ def _load_labels(test_data: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def _load_executorch_model(model_path: str):
+    """Load ExecuTorch portable model for Python inference."""
+    from executorch.extension.pybindings.portable_lib import _load_for_executorch
+    return _load_for_executorch(model_path)
+
+
+def _executorch_forward(executorch_model, feats: torch.Tensor) -> torch.Tensor:
+    """Run ExecuTorch model and normalize outputs to Tensor[B, T, V]."""
+    inp = feats.detach().cpu().contiguous()
+    out = executorch_model.forward((inp,))
+
+    if isinstance(out, dict):
+        out_vals = list(out.values())
+        out = out_vals[0] if out_vals else None
+    if isinstance(out, (list, tuple)):
+        out = out[0] if len(out) > 0 else None
+    if out is None:
+        raise RuntimeError('ExecuTorch model output is empty.')
+    if not torch.is_tensor(out):
+        out = torch.tensor(out)
+    return out
+
+
+def _normalize_executorch_input(feats: torch.Tensor, target_len: int) -> torch.Tensor:
+    # feats: [1, T, F]
+    cur = int(feats.size(1))
+    if cur == target_len:
+        return feats
+    if cur > target_len:
+        return feats[:, :target_len, :]
+    pad = torch.zeros(feats.size(0),
+                      target_len - cur,
+                      feats.size(2),
+                      dtype=feats.dtype)
+    return torch.cat([feats, pad], dim=1)
+
+
 def main():
     args = get_args()
     logging.basicConfig(level=logging.DEBUG,
                         format='%(asctime)s %(levelname)s %(message)s')
-    if args.gpu >= 0:
+    is_executorch = bool(args.executorch_model)
+    if args.gpu >= 0 and not is_executorch:
         torch.cuda.set_device(args.gpu)
 
     with open(args.config, 'r') as fin:
@@ -240,7 +288,20 @@ def main():
                                   num_workers=args.num_workers,
                                   prefetch_factor=args.prefetch)
 
-    if args.jit_model:
+    is_jit = args.jit_model
+
+    if not is_executorch and not args.checkpoint:
+        raise ValueError('Either --checkpoint or --executorch_model must be provided.')
+
+    executorch_model = None
+    if is_executorch:
+        logging.info('Using ExecuTorch model: %s', args.executorch_model)
+        if not os.path.exists(args.executorch_model):
+            raise FileNotFoundError('ExecuTorch model not found: {}'.format(args.executorch_model))
+        executorch_model = _load_executorch_model(args.executorch_model)
+        device = torch.device('cpu')
+        model = None
+    elif is_jit:
         model = torch.jit.load(args.checkpoint)
         # For script model, only cpu is supported.
         device = torch.device('cpu')
@@ -250,8 +311,9 @@ def main():
         load_checkpoint(model, args.checkpoint)
         use_cuda = args.gpu >= 0 and torch.cuda.is_available()
         device = torch.device('cuda' if use_cuda else 'cpu')
-    model = model.to(device)
-    model.eval()
+    if model is not None:
+        model = model.to(device)
+        model.eval()
     score_abs_path = os.path.abspath(args.score_file)
 
     # 4. parse keywords tokens
@@ -306,7 +368,25 @@ def main():
             label_lengths = batch_dict['target_lengths']
             feats = feats.to(device)
             lengths = lengths.to(device)
-            logits_raw, _ = model(feats)  # (B, T, V)
+            if is_executorch:
+                # ExecuTorch portable runtime expects static input shapes.
+                # Run per-utterance and pad/truncate to executorch_seq_len.
+                logits_list = []
+                for bi in range(feats.size(0)):
+                    one = feats[bi:bi + 1].cpu()
+                    one = _normalize_executorch_input(one, args.executorch_seq_len)
+                    one_logits = _executorch_forward(executorch_model, one)
+                    if one_logits.dim() == 2:
+                        one_logits = one_logits.unsqueeze(0)
+                    logits_list.append(one_logits)
+                logits_raw = torch.cat(logits_list, dim=0)
+                lengths = torch.clamp(lengths, max=args.executorch_seq_len)
+            # TorchScript traced models require explicit in_cache argument
+            elif is_jit:
+                empty_cache = torch.zeros(0, 0, 0, dtype=torch.float, device=device)
+                logits_raw, _ = model(feats, empty_cache)  # (B, T, V)
+            else:
+                logits_raw, _ = model(feats)  # (B, T, V)
             probs = logits_raw.softmax(2)
             probs_cpu = probs.detach().cpu()
             for i in range(len(keys)):

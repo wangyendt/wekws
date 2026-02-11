@@ -6,17 +6,22 @@
 #   bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/61.pt --dataset test --gpu 0
 #   bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/61.pt --dataset dev --gpu "0,1,2,3"
 #   bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/avg_30.pt --dataset test
+#   bash evaluate.sh --checkpoint exp/.../229_int8.zip --jit_model true --dict_dir dict_top20
 
 . ./path.sh
 
 # 默认参数
 checkpoint=""
+executorch_model=""
+executorch_seq_len=100
+model_config=""
 dataset="test"  # train, dev, test
 gpu="0"
 batch_size=256
 num_workers=8
 keywords="嗨小问,你好问问"  # 在实际调用时会转换为 Unicode 转义
 dict_dir="dict"
+jit_model=false
 token_file="mobvoi_kws_transcription/tokens.txt"
 lexicon_file="mobvoi_kws_transcription/lexicon.txt"
 window_shift=50
@@ -25,27 +30,41 @@ window_shift=50
 . tools/parse_options.sh || exit 1;
 
 # 检查必需参数
-if [ -z "$checkpoint" ]; then
-    echo "错误: 必须指定 --checkpoint 参数"
-    echo "用法: bash evaluate.sh --checkpoint <checkpoint_path> [--dataset train|dev|test] [--gpu <gpu_ids>]"
+if [ -z "$checkpoint" ] && [ -z "$executorch_model" ]; then
+    echo "错误: 必须指定 --checkpoint 或 --executorch_model 参数"
+    echo "用法: bash evaluate.sh [--checkpoint <checkpoint_path>] [--executorch_model <model.pte>] [--dataset train|dev|test] [--gpu <gpu_ids>]"
     echo ""
     echo "示例:"
     echo "  bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/61.pt --dataset test --gpu 0"
     echo "  bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/avg_30.pt --dataset dev --gpu \"0,1,2,3\""
+    echo "  bash evaluate.sh --executorch_model exp/.../229_executorch_fp32.pte --checkpoint exp/.../229.pt --dict_dir dict_top20"
     exit 1
 fi
 
-# 检查 checkpoint 文件是否存在
-if [ ! -f "$checkpoint" ]; then
+# 检查模型文件是否存在
+if [ -n "$checkpoint" ] && [ ! -f "$checkpoint" ]; then
     echo "错误: checkpoint 文件不存在: $checkpoint"
     exit 1
 fi
+if [ -n "$executorch_model" ] && [ ! -f "$executorch_model" ]; then
+    echo "错误: executorch_model 文件不存在: $executorch_model"
+    exit 1
+fi
+# 从模型路径推导 config 和输出目录
+primary_model="$checkpoint"
+if [ -n "$executorch_model" ]; then
+    primary_model="$executorch_model"
+fi
+model_dir=$(dirname "$primary_model")
+model_filename=$(basename "$primary_model")
+model_basename="${model_filename%.*}"
 
-# 从 checkpoint 路径推导 config 和输出目录
-checkpoint_dir=$(dirname "$checkpoint")
-checkpoint_basename=$(basename "$checkpoint" .pt)
-config_file="$checkpoint_dir/config.yaml"
-result_dir="$checkpoint_dir/${dataset}_${checkpoint_basename}"
+if [ -n "$model_config" ]; then
+    config_file="$model_config"
+else
+    config_file="$model_dir/config.yaml"
+fi
+result_dir="$model_dir/${dataset}_${model_basename}"
 
 # 检查 config 文件是否存在
 if [ ! -f "$config_file" ]; then
@@ -78,6 +97,7 @@ echo "================================================"
 echo "🎯 评测配置"
 echo "================================================"
 echo "模型 checkpoint: $checkpoint"
+echo "ExecuTorch模型:   $executorch_model"
 echo "模型 config:     $config_file"
 echo "评测数据集:      $dataset ($data_file)"
 echo "GPU:             $gpu"
@@ -90,24 +110,44 @@ echo ""
 # 选择第一个 GPU 用于推理（多GPU时只用第一个）
 first_gpu=$(echo $gpu | awk -F',' '{print $1}')
 
+if [ "$jit_model" = "true" ]; then
+    echo "JIT 模式:        已启用（TorchScript 模型，CPU 推理）"
+fi
+if [ -n "$executorch_model" ]; then
+    echo "ExecuTorch 模式: 已启用（CPU 推理）"
+fi
+
 # Step 1: 运行推理，生成 score 文件
 score_file="$result_dir/score.txt"
 echo "🚀 Step 1: 运行推理，生成检测结果..."
 echo "输出文件: $score_file"
 echo ""
 
-python wekws/bin/score_ctc.py \
-    --config "$config_file" \
-    --test_data "$data_file" \
-    --gpu "$first_gpu" \
-    --batch_size "$batch_size" \
-    --checkpoint "$checkpoint" \
-    --dict "$dict_dir" \
-    --score_file "$score_file" \
-    --num_workers "$num_workers" \
-    --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee" \
-    --token_file "$token_file" \
-    --lexicon_file "$lexicon_file"
+score_cmd=(python wekws/bin/score_ctc.py
+    --config "$config_file"
+    --test_data "$data_file"
+    --gpu "$first_gpu"
+    --batch_size "$batch_size"
+    --dict "$dict_dir"
+    --score_file "$score_file"
+    --num_workers "$num_workers"
+    --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee"
+    --token_file "$token_file"
+    --lexicon_file "$lexicon_file")
+
+if [ -n "$checkpoint" ]; then
+    score_cmd+=(--checkpoint "$checkpoint")
+fi
+if [ "$jit_model" = "true" ]; then
+    score_cmd+=(--jit_model)
+fi
+if [ -n "$executorch_model" ]; then
+    score_cmd+=(--executorch_model "$executorch_model")
+    score_cmd+=(--executorch_seq_len "$executorch_seq_len")
+fi
+
+echo "score_ctc Python: python"
+"${score_cmd[@]}"
 
 if [ $? -ne 0 ]; then
     echo "❌ 推理失败！"
