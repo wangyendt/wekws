@@ -140,8 +140,17 @@ def _lower_to_executorch(exported_program, use_xnnpack: bool):
     if use_xnnpack:
         from executorch.backends.xnnpack.partition.xnnpack_partitioner import \
             XnnpackPartitioner
-        edge_mgr = to_edge_transform_and_lower(
-            exported_program, partitioners=[XnnpackPartitioner()])
+        # Compat across ExecuTorch versions:
+        # newer builds use kwarg `partitioner`, some older ones use `partitioners`.
+        partitioner_list = [XnnpackPartitioner()]
+        try:
+            edge_mgr = to_edge_transform_and_lower(
+                exported_program, partitioner=partitioner_list)
+        except TypeError as e:
+            if 'partitioner' not in str(e):
+                raise
+            edge_mgr = to_edge_transform_and_lower(
+                exported_program, partitioners=partitioner_list)
     else:
         edge_mgr = to_edge_transform_and_lower(exported_program)
     return edge_mgr.to_executorch()

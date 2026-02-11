@@ -25,6 +25,8 @@ jit_model=false
 token_file="mobvoi_kws_transcription/tokens.txt"
 lexicon_file="mobvoi_kws_transcription/lexicon.txt"
 window_shift=50
+sample_ratio=1.0
+sample_seed=42
 
 # 解析命令行参数
 . tools/parse_options.sh || exit 1;
@@ -78,6 +80,14 @@ if [ ! -f "$data_file" ]; then
     echo "错误: 数据文件不存在: $data_file"
     exit 1
 fi
+if ! [[ "$sample_ratio" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    echo "错误: sample_ratio 必须是数字，当前: $sample_ratio"
+    exit 1
+fi
+if ! awk -v r="$sample_ratio" 'BEGIN { exit !(r>0 && r<=1) }'; then
+    echo "错误: sample_ratio 必须在 (0, 1] 范围内，当前: $sample_ratio"
+    exit 1
+fi
 
 # 检查 token 和 lexicon 文件
 if [ ! -f "$token_file" ]; then
@@ -92,6 +102,30 @@ fi
 # 创建结果目录
 mkdir -p "$result_dir"
 
+# 可选随机抽样子集用于快速验证
+tmp_eval_data=""
+if ! awk -v r="$sample_ratio" 'BEGIN { exit !(r<1) }'; then
+    :
+else
+    total_lines=$(awk 'NF>0{c++} END{print c+0}' "$data_file")
+    sample_lines=$(awk -v c="$total_lines" -v r="$sample_ratio" 'BEGIN {
+        n = int(c * r + 0.999999);
+        if (n < 1) n = 1;
+        if (n > c) n = c;
+        print n
+    }')
+    tmp_eval_data="$result_dir/.sample_${dataset}_$(date +%s)_$$.list"
+    shuf --random-source=<(yes "$sample_seed") -n "$sample_lines" "$data_file" > "$tmp_eval_data"
+    data_file="$tmp_eval_data"
+fi
+
+cleanup() {
+    if [ -n "$tmp_eval_data" ] && [ -f "$tmp_eval_data" ]; then
+        rm -f "$tmp_eval_data"
+    fi
+}
+trap cleanup EXIT
+
 # 输出配置信息
 echo "================================================"
 echo "🎯 评测配置"
@@ -100,6 +134,7 @@ echo "模型 checkpoint: $checkpoint"
 echo "ExecuTorch模型:   $executorch_model"
 echo "模型 config:     $config_file"
 echo "评测数据集:      $dataset ($data_file)"
+echo "采样比例:        $sample_ratio"
 echo "GPU:             $gpu"
 echo "Batch size:      $batch_size"
 echo "关键词:          $keywords"
