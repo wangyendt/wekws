@@ -27,7 +27,7 @@ bash ./run_distill.sh \
     --norm_mean true \
     --norm_var true \
     --seed 666 \
-    --checkpoint exp/fsmn_ctc_distill_mini_align_20/79.pt \
+    --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/139.pt \
     --resume_lr 0.001 \
     --align_epochs 180 \
     --finetune_epochs 50 \
