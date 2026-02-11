@@ -48,3 +48,10 @@ bash ./evaluate.sh --checkpoint exp/fsmn_ctc_top2598/79.pt --dict_dir dict_top25
 
 # 统计
 python analyze_exp_test_stats.py --test-id 2
+
+
+
+
+# 计算 MACs / FLOPs
+cd ~/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0/wayne_scripts
+python compute_fsmn_flops.py  --checkpoints ../exp/fsmn_ctc_distill_mini_align_20_test2/229.pt  --skip_frame 3 --seconds 2
