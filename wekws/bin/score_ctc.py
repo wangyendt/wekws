@@ -213,10 +213,43 @@ def _load_labels(test_data: str) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def _is_probably_cadence_pte(model_path: str) -> bool:
+    """Best-effort check whether a .pte uses cadence:: operators."""
+    try:
+        with open(model_path, 'rb') as f:
+            blob = f.read()
+        return b'cadence::' in blob
+    except OSError:
+        return False
+
+
 def _load_executorch_model(model_path: str):
     """Load ExecuTorch portable model for Python inference."""
+    # This script uses portable_lib pybindings. Cadence/HiFi4 kernels are usually
+    # not bundled in that runtime, so fail fast with actionable guidance.
+    if _is_probably_cadence_pte(model_path) and \
+            os.environ.get('WEKWS_TRY_CADENCE_PORTABLE', '0') != '1':
+        raise RuntimeError(
+            '检测到 Cadence/HiFi4 ExecuTorch 模型（包含 cadence:: 算子）。\\n'
+            '当前 evaluate.sh/score_ctc.py 使用 portable_lib 推理，通常不包含 Cadence 内核，'
+            '因此无法在本机直接加载此模型。\\n'
+            '解决方案:\\n'
+            '1) 本机评估请改用 --backend xnnpack 导出后再评估；\\n'
+            '2) hifi4 模型请在 ExecuTorch Cadence 运行环境中评估（构建并使用 cadence runner）。\\n'
+            '如你已确认当前 portable_lib 含 Cadence 内核，可设置环境变量 '
+            'WEKWS_TRY_CADENCE_PORTABLE=1 继续尝试加载。')
+
     from executorch.extension.pybindings.portable_lib import _load_for_executorch
-    return _load_for_executorch(model_path)
+    try:
+        return _load_for_executorch(model_path)
+    except RuntimeError as e:
+        msg = str(e)
+        if 'Missing operator' in msg or 'cadence::' in msg:
+            raise RuntimeError(
+                'ExecuTorch 模型加载失败：缺少后端算子内核。\\n'
+                '若这是 hifi4 模型，请使用 Cadence runner；若在本机评估，请改用 --backend xnnpack。\\n'
+                f'原始错误: {msg}') from e
+        raise
 
 
 def _executorch_forward(executorch_model, feats: torch.Tensor) -> torch.Tensor:

@@ -10,6 +10,9 @@
 #   # 导出 INT8 ExecuTorch 模型（PT2E 校准）
 #   bash run_executorch_pt2e.sh --checkpoint exp/.../229.pt --quant_type int8 --dict_dir dict_top20 1 1
 #
+#   # 导出 HiFi4/Cadence INT8 模型
+#   bash run_executorch_pt2e.sh --checkpoint exp/.../229.pt --quant_type int8 --backend hifi4 --dict_dir dict_top20 1 1
+#
 #   # 导出后直接评估（Stage 2）
 #   bash run_executorch_pt2e.sh --checkpoint exp/.../229.pt --quant_type fp32 --dict_dir dict_top20 1 2
 
@@ -21,12 +24,16 @@ stop_stage=2
 checkpoint=""
 dict_dir="dict_top20"
 quant_type="fp32"      # fp32 or int8
+backend="xnnpack"      # xnnpack, portable, hifi4
 num_calib=200
 calib_data="data/train/data.list"
 batch_size=1
 num_workers=4
 seed=42
 export_seq_len=100
+hifi4_opt_level=1
+hifi4_quantizer="wakeword"
+require_full_int8=false
 dataset="test"
 gpu="0"
 eval_batch_size=256
@@ -61,7 +68,11 @@ if [ ! -f "$config_file" ]; then
 fi
 
 if [ -z "$output_model" ]; then
-  output_model="$checkpoint_dir/${checkpoint_basename}_executorch_${quant_type}.pte"
+  backend_suffix=""
+  if [ "$backend" != "xnnpack" ]; then
+    backend_suffix="_${backend}"
+  fi
+  output_model="$checkpoint_dir/${checkpoint_basename}_executorch${backend_suffix}_${quant_type}.pte"
 fi
 
 stage_int=$(echo "$stage" | awk '{print int($1)}')
@@ -73,22 +84,30 @@ if [ ${stage_int} -le 1 ] && [ ${stop_stage_int} -ge 1 ]; then
   echo "================================================"
   echo "checkpoint: $checkpoint"
   echo "config:     $config_file"
+  echo "backend:    $backend"
   echo "输出模型:    $output_model"
   echo "Python运行器: python"
   echo "================================================"
 
-  python wekws/bin/export_executorch_pt2e.py \
+  export_cmd=(python wekws/bin/export_executorch_pt2e.py
     --config "$config_file" \
     --checkpoint "$checkpoint" \
     --output_model "$output_model" \
     --quant_type "$quant_type" \
+    --backend "$backend" \
     --dict "$dict_dir" \
     --calib_data "$calib_data" \
     --num_calib "$num_calib" \
     --batch_size "$batch_size" \
     --num_workers "$num_workers" \
     --seed "$seed" \
-    --export_seq_len "$export_seq_len"
+    --export_seq_len "$export_seq_len" \
+    --hifi4_opt_level "$hifi4_opt_level" \
+    --hifi4_quantizer "$hifi4_quantizer")
+  if [ "$require_full_int8" = "true" ]; then
+    export_cmd+=(--require_full_int8)
+  fi
+  "${export_cmd[@]}"
 
   if [ $? -ne 0 ]; then
     echo "错误: ExecuTorch 导出失败"

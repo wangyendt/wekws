@@ -76,13 +76,23 @@ python wekws/bin/export_onnx.py \
 # FP32 导出
 bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type fp32 --dict_dir dict_top20 1 1
 # INT8 PT2E 量化导出 + 评估（Stage 1: 导出, Stage 2: 评估）
-bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --dict_dir dict_top20 1 2
+bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --num_calib 200 --calib_data data/train/data.list --dict_dir dict_top20 1 2
 # 仅 INT8 导出（不评估）
-bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --dict_dir dict_top20 1 1
+bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --num_calib 200 --calib_data data/train/data.list --dict_dir dict_top20 1 1
 # 自定义校准数据量
 bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --num_calib 500 --calib_data data/dev/data.list --dict_dir dict_top20 1 1
+# 指定 backend: xnnpack（默认后端，这里显式写出）
+bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --backend xnnpack --num_calib 200 --calib_data data/train/data.list --dict_dir dict_top20 1 1
+# 指定 backend: portable（不做 xnnpack 分区）
+bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --backend portable --num_calib 200 --calib_data data/train/data.list --dict_dir dict_top20 1 1
+# 指定 backend: hifi4（Cadence AOT）
+bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --backend hifi4 --hifi4_quantizer wakeword --hifi4_opt_level 1 --num_calib 200 --calib_data data/train/data.list --dict_dir dict_top20 1 1
+# 尽量要求“全 int8”（检测到 float 计算算子则导出失败）
+bash ./run_executorch_pt2e.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --quant_type int8 --backend xnnpack --require_full_int8 true --num_calib 200 --calib_data data/train/data.list --dict_dir dict_top20 1 1
 # 单独评估已有 ExecuTorch 模型
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --executorch_model exp/fsmn_ctc_distill_mini_align_20_test2/229_executorch_int8.pte --dict_dir dict_top20
+# hifi4 模型默认不能直接用 evaluate.sh（portable_lib 缺少 cadence 内核）
+# 建议: 本机评估导出 xnnpack；hifi4 请在 Cadence runtime / cadence runner 环境评估
 # 若导出模型是静态输入长度，可在评估时指定长度（默认 100）
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --executorch_model exp/fsmn_ctc_distill_mini_align_20_test2/229_executorch_int8.pte --dict_dir dict_top20 --executorch_seq_len 100
 
@@ -90,3 +100,12 @@ bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt 
 # 计算 MACs / FLOPs
 cd ~/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0/wayne_scripts
 python compute_fsmn_flops.py  --checkpoints ../exp/fsmn_ctc_distill_mini_align_20_test2/229.pt  --skip_frame 3 --seconds 2
+
+# 模型参数 dtype 统计（支持 float checkpoint / ExecuTorch .pte）
+cd ~/work/code/project/ffalcon/wekws_baseline
+# 1) 原始 float checkpoint（按 config 构建模型后统计参数）
+python tools/stat_model_param_dtypes.py --workdir examples/hi_xiaowen/s0 --model exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --config exp/fsmn_ctc_distill_mini_align_20_test2/config.yaml
+# 2) xnnpack .pte（used_only 只统计图中被使用的张量；xnnpack 权重可能封装在 delegate blob）
+python tools/stat_model_param_dtypes.py --workdir examples/hi_xiaowen/s0 --model exp/fsmn_ctc_distill_mini_align_20_test2/229_executorch_int8.pte --used_only
+# 3) hifi4 .pte（可看到 int8/int32 常量参数分布）
+python tools/stat_model_param_dtypes.py --workdir examples/hi_xiaowen/s0 --model exp/fsmn_ctc_distill_mini_align_20_test2/229_executorch_hifi4_int8.pte --used_only
