@@ -17,27 +17,13 @@ bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_baseline_4gpus/79.pt --d
 bash ./run_bash_delay.sh --cmd "bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_baseline_4gpus/79.pt --dict_dir dict --num_keywords 2599 --target_exp_dir exp/fsmn_ctc_distill_mini_2599_baseline --init_from_teacher true 2 3"
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_mini_align_20 --gpus "0,1,2,3" --align_epochs 80 --finetune_epochs 20 2 3
 
-# 知识再蒸馏
-bash ./run_distill.sh \
-    --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt \
-    --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml \
-    --dict_dir dict_top20 \
-    --target_exp_dir exp/fsmn_ctc_distill_mini_align_20_test2 \
-    --gpus "0,1,2,3" \
-    --norm_mean true \
-    --norm_var true \
-    --seed 666 \
-    --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/139.pt \
-    --resume_lr 0.001 \
-    --align_epochs 180 \
-    --finetune_epochs 50 \
-    --finetune_lr 0.0001 \
-    --head_lr_ratio 0.1 \
-    --finetune_mse_weight_start 0.5 \
-    --finetune_mse_weight_end 0.1 \
-    --layer_mapping "0:1,1:2,2:3" \
-    --lr_scheduler none \
-    2 2
+# 知识再蒸馏（历史命令，保留）
+bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_mini_align_20_test2 --gpus "0,1,2,3" --norm_mean true --norm_var true --seed 666 --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/139.pt --resume_lr 0.001 --align_epochs 180 --finetune_epochs 50 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 2
+
+# 知识蒸馏v2（更小学生，从头训练 200+100）
+bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_v2_a80_p48_l3.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_v2_a80_p48_l3 --gpus "0,1,2,3" --seed 666 --align_epochs 200 --finetune_epochs 100 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler plateau --scheduler_start_epoch 200 2 3
+bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_v2_a64_p32_l3.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_v2_a64_p32_l3 --gpus "0,1,2,3" --seed 666 --align_epochs 200 --finetune_epochs 100 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler plateau --scheduler_start_epoch 200 2 3
+bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_v2_a64_p32_l2.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_v2_a64_p32_l2 --gpus "0,1,2,3" --seed 666 --align_epochs 200 --finetune_epochs 100 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.6 --finetune_mse_weight_end 0.15 --layer_mapping "0:2,1:3" --lr_scheduler plateau --scheduler_start_epoch 200 2 3
 
 
 # 评估

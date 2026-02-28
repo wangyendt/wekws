@@ -77,8 +77,25 @@ class DistillExecutor:
         Returns:
             Scalar MSE loss averaged over all mapped pairs and valid frames.
         """
-        total_loss = torch.tensor(0.0,
-                                  device=student_block_outputs[0].device)
+        if len(student_block_outputs) == 0 or len(teacher_block_outputs) == 0:
+            raise ValueError(
+                'Empty block outputs: '
+                f'student={len(student_block_outputs)}, '
+                f'teacher={len(teacher_block_outputs)}')
+        if len(layer_mapping) == 0:
+            raise ValueError('layer_mapping is empty')
+        max_s = max(s_idx for s_idx, _ in layer_mapping)
+        max_t = max(t_idx for _, t_idx in layer_mapping)
+        if max_s >= len(student_block_outputs) or max_t >= len(
+                teacher_block_outputs):
+            raise ValueError(
+                'layer_mapping index out of range: '
+                f'mapping={layer_mapping}, '
+                f'student_blocks={len(student_block_outputs)}, '
+                f'teacher_blocks={len(teacher_block_outputs)}')
+
+        total_loss = torch.tensor(
+            0.0, device=student_block_outputs[0].device)
         for s_idx, t_idx in layer_mapping:
             s_feat = student_block_outputs[s_idx]  # (B, T, D)
             t_feat = teacher_block_outputs[t_idx].detach()  # (B, T, D)

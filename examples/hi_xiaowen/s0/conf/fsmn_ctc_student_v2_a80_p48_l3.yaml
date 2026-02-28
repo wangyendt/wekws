@@ -1,0 +1,72 @@
+# FSMN distill v2 student (smaller than mini)
+# Variant: input_affine_dim=80, proj_dim=48, num_layers=3
+# Total params (output_dim=20): 164,768
+
+dataset_conf:
+    filter_conf:
+        max_length: 2048
+        min_length: 0
+        token_max_length: 200
+        token_min_length: 1
+        max_output_input_ratio: 1
+        min_output_input_ratio: 0.0005
+    resample_conf:
+        resample_rate: 16000
+    speed_perturb: false
+    feats_type: 'fbank'
+    fbank_conf:
+        num_mel_bins: 80
+        frame_shift: 10
+        frame_length: 25
+        dither: 1.0
+    context_expansion: true
+    context_expansion_conf:
+        left: 2
+        right: 2
+    frame_skip: 3
+    spec_aug: true
+    spec_aug_conf:
+        num_t_mask: 1
+        num_f_mask: 1
+        max_t: 20
+        max_f: 10
+    shuffle: true
+    shuffle_conf:
+        shuffle_size: 1500
+    sort: false
+    batch_conf:
+        batch_size: 256
+
+model:
+    input_dim: 400
+    preprocessing:
+        type: none
+    hidden_dim: 64
+    backbone:
+        type: fsmn
+        input_affine_dim: 80
+        num_layers: 3
+        linear_dim: 250
+        proj_dim: 48
+        left_order: 10
+        right_order: 2
+        left_stride: 1
+        right_stride: 1
+        output_affine_dim: 140
+    classifier:
+        type: identity
+        dropout: 0.1
+    activation:
+        type: identity
+
+
+optim: adam
+optim_conf:
+    lr: 0.001
+    weight_decay: 0.0001
+
+training_config:
+    grad_clip: 5
+    max_epoch: 120
+    log_interval: 10
+    criterion: ctc
