@@ -11,10 +11,17 @@ import sys
 import sqlite3
 import json
 import subprocess
+import tempfile
+import shutil
 from pathlib import Path
+from typing import Any, Dict, Optional
 import streamlit as st
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import torchaudio
 from PIL import Image
+from pywayne.tools import read_yaml_config, write_yaml_config
 
 # 设置页面配置
 st.set_page_config(
@@ -32,6 +39,18 @@ PROJECT_DIR = REPO_ROOT / "examples" / "hi_xiaowen" / "s0"  # 项目目录
 DB_PATH = PROJECT_DIR / "data" / "metadata.db"
 VISUALIZE_SCRIPT = PROJECT_DIR / "wayne_scripts" / "stage_1_visualize.py"
 VISUALIZE_DIR = PROJECT_DIR / "wayne_scripts" / "visualizations"
+SCORE_CTC_SCRIPT = REPO_ROOT / "wekws" / "bin" / "score_ctc.py"
+MODEL_REGISTRY_YAML = PROJECT_DIR / "wayne_scripts" / "webui_models.yaml"
+INFER_DICT_DIR = PROJECT_DIR / "dict_top20"
+INFER_TOKEN_FILE = PROJECT_DIR / "mobvoi_kws_transcription" / "tokens.txt"
+INFER_LEXICON_FILE = PROJECT_DIR / "mobvoi_kws_transcription" / "lexicon.txt"
+INFER_KEYWORDS_ESCAPED = r"\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee"
+INFER_WAKEWORDS = {"嗨小问", "你好问问"}
+FRAME_SHIFT_SECONDS = 0.01
+WAKEWORD_DISPLAY = {
+    "嗨小问": "haixiaowen",
+    "你好问问": "nihaowenwen",
+}
 
 
 # ==================== 数据库操作 ====================
@@ -90,6 +109,210 @@ tools/generate_metadata_db.py
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row  # 使结果可以通过列名访问
     return conn
+
+
+def _normalize_model_path(path_str: str) -> str:
+    model_path = Path(path_str).expanduser()
+    if not model_path.is_absolute():
+        model_path = (PROJECT_DIR / model_path).resolve()
+    else:
+        model_path = model_path.resolve()
+    return str(model_path)
+
+
+def load_model_registry() -> tuple[Dict[str, Any], Optional[str]]:
+    default_registry: Dict[str, Any] = {'models': [], 'last_selected': ''}
+    if not MODEL_REGISTRY_YAML.exists():
+        write_yaml_config(str(MODEL_REGISTRY_YAML), default_registry, update=False)
+        return default_registry, None
+
+    try:
+        data = read_yaml_config(str(MODEL_REGISTRY_YAML))
+    except Exception as e:
+        return default_registry, str(e)
+
+    if not isinstance(data, dict):
+        return default_registry, None
+
+    models = []
+    for model_path in data.get('models', []):
+        if not isinstance(model_path, str):
+            continue
+        model_path = model_path.strip()
+        if not model_path:
+            continue
+        if model_path not in models:
+            models.append(model_path)
+
+    last_selected = data.get('last_selected', '')
+    if not isinstance(last_selected, str):
+        last_selected = ''
+    if last_selected not in models:
+        last_selected = ''
+
+    return {'models': models, 'last_selected': last_selected}, None
+
+
+def save_model_registry(registry: Dict[str, Any]) -> None:
+    models = []
+    for model_path in registry.get('models', []):
+        if not isinstance(model_path, str):
+            continue
+        model_path = model_path.strip()
+        if not model_path:
+            continue
+        if model_path not in models:
+            models.append(model_path)
+
+    last_selected = registry.get('last_selected', '')
+    if not isinstance(last_selected, str):
+        last_selected = ''
+    if last_selected not in models:
+        last_selected = ''
+
+    write_yaml_config(
+        str(MODEL_REGISTRY_YAML),
+        {'models': models, 'last_selected': last_selected},
+        update=False
+    )
+
+
+def _resolve_config_from_model(model_path: Path) -> Path:
+    return model_path.parent / 'config.yaml'
+
+
+def _get_time_resolution_from_config(config_path: Path) -> float:
+    try:
+        config = read_yaml_config(str(config_path))
+        dataset_conf = config.get('dataset_conf', {}) if isinstance(config, dict) else {}
+        fbank_conf = dataset_conf.get('fbank_conf', {}) if isinstance(dataset_conf, dict) else {}
+        frame_shift_ms = float(fbank_conf.get('frame_shift', 10))
+        frame_skip = int(dataset_conf.get('frame_skip', 1))
+        if frame_skip <= 0:
+            frame_skip = 1
+        return max(frame_shift_ms * frame_skip / 1000.0, 1e-3)
+    except Exception:
+        return FRAME_SHIFT_SECONDS
+
+
+@st.cache_data(show_spinner=False)
+def run_single_audio_inference(model_path: str,
+                               model_mtime: float,
+                               config_mtime: float,
+                               utt_id: str,
+                               wav_path: str,
+                               text_content: str,
+                               duration: float) -> Dict[str, Any]:
+    del model_mtime, config_mtime
+    model_path_obj = Path(model_path)
+    config_path = _resolve_config_from_model(model_path_obj)
+    time_resolution_sec = _get_time_resolution_from_config(config_path)
+    temp_dir = Path(tempfile.mkdtemp(prefix='webui_kws_infer_'))
+    test_data_path = temp_dir / 'single_data.list'
+    score_file = temp_dir / 'score.txt'
+    decode_file = temp_dir / 'decode.jsonl'
+
+    test_obj = {
+        'key': utt_id,
+        'wav': wav_path,
+        'txt': text_content or '',
+        'duration': float(duration) if duration is not None else 0.0
+    }
+
+    try:
+        with open(test_data_path, 'w', encoding='utf8') as fout:
+            fout.write(json.dumps(test_obj, ensure_ascii=False) + '\n')
+
+        cmd = [
+            sys.executable,
+            str(SCORE_CTC_SCRIPT),
+            '--config', str(config_path),
+            '--test_data', str(test_data_path),
+            '--gpu', '-1',
+            '--batch_size', '1',
+            '--num_workers', '1',
+            '--dict', str(INFER_DICT_DIR),
+            '--score_file', str(score_file),
+            '--keywords', INFER_KEYWORDS_ESCAPED,
+            '--token_file', str(INFER_TOKEN_FILE),
+            '--lexicon_file', str(INFER_LEXICON_FILE),
+            '--checkpoint', str(model_path_obj),
+            '--dump_decode_file', str(decode_file)
+        ]
+
+        if model_path_obj.suffix == '.zip':
+            cmd.append('--jit_model')
+
+        env = os.environ.copy()
+        old_pythonpath = env.get('PYTHONPATH', '')
+        if old_pythonpath:
+            env['PYTHONPATH'] = f"{REPO_ROOT}:{old_pythonpath}"
+        else:
+            env['PYTHONPATH'] = str(REPO_ROOT)
+
+        result = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+        if result.returncode != 0:
+            return {
+                'ok': False,
+                'error': f'推理失败(returncode={result.returncode})',
+                'stderr': result.stderr,
+                'stdout': result.stdout,
+            }
+
+        decode_lines = []
+        if decode_file.exists():
+            with open(decode_file, 'r', encoding='utf8') as fin:
+                decode_lines = [line.strip() for line in fin if line.strip()]
+
+        if not decode_lines:
+            return {
+                'ok': False,
+                'error': '推理完成但未生成解码结果',
+                'stderr': result.stderr,
+                'stdout': result.stdout,
+            }
+
+        decode_obj = json.loads(decode_lines[0])
+        kws_result = decode_obj.get('kws_result', {}) if isinstance(decode_obj, dict) else {}
+
+        triggered = bool(kws_result.get('triggered'))
+        keyword = kws_result.get('keyword')
+        start_frame = kws_result.get('start_frame')
+        end_frame = kws_result.get('end_frame')
+
+        start_time_sec = None
+        end_time_sec = None
+        if start_frame is not None:
+            start_time_sec = float(start_frame) * time_resolution_sec
+        if end_frame is not None:
+            end_time_sec = float(end_frame) * time_resolution_sec
+
+        return {
+            'ok': True,
+            'triggered': triggered,
+            'keyword': keyword,
+            'score': kws_result.get('score'),
+            'start_frame': start_frame,
+            'end_frame': end_frame,
+            'time_resolution_sec': time_resolution_sec,
+            'start_time_sec': start_time_sec,
+            'end_time_sec': end_time_sec,
+            'stdout': result.stdout,
+            'stderr': result.stderr,
+        }
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': '推理超时（超过180秒）'}
+    except Exception as e:
+        return {'ok': False, 'error': f'推理异常: {e}'}
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def query_audio_files(conn, filters=None, search_text="", limit=100, offset=0):
@@ -493,7 +716,7 @@ def render_sidebar(filter_options):
     st.sidebar.markdown("---")
     if st.sidebar.button("🔄 重置所有筛选", width='stretch'):
         st.rerun()
-    
+
     # 显示当前筛选摘要
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 📋 当前筛选")
@@ -522,8 +745,65 @@ def render_sidebar(filter_options):
     
     if filter_count == 0:
         st.sidebar.text("无筛选条件")
-    
-    return search_text, filters
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🧠 指定模型推理")
+    st.sidebar.caption(f"模型列表持久化: `{MODEL_REGISTRY_YAML}`")
+
+    registry, registry_error = load_model_registry()
+    if registry_error:
+        st.sidebar.warning(f"读取模型列表失败，使用空列表: {registry_error}")
+    model_list = registry.get('models', [])
+
+    model_options = [''] + model_list
+    default_index = 0
+    last_selected = registry.get('last_selected', '')
+    if last_selected in model_options:
+        default_index = model_options.index(last_selected)
+
+    selected_model = st.sidebar.selectbox(
+        "推理模型",
+        options=model_options,
+        index=default_index,
+        format_func=lambda value: "（默认空，不做推理）" if value == '' else value,
+        help="每条选中的音频会用该模型推理，并在波形图上标注唤醒时刻"
+    )
+
+    new_model_raw = st.sidebar.text_input(
+        "新增模型路径",
+        placeholder="如: exp/fsmn_ctc_distill_v2_a64_p32_l2/299.pt"
+    )
+    add_col, remove_col = st.sidebar.columns(2)
+
+    if add_col.button("➕ 添加模型", width='stretch'):
+        model_input = new_model_raw.strip()
+        if not model_input:
+            st.sidebar.error("请先输入模型路径")
+        else:
+            model_path = _normalize_model_path(model_input)
+            if not Path(model_path).exists():
+                st.sidebar.error(f"模型不存在: {model_path}")
+            elif model_path not in model_list:
+                model_list.append(model_path)
+                registry['models'] = model_list
+                registry['last_selected'] = model_path
+                save_model_registry(registry)
+                st.rerun()
+            else:
+                st.sidebar.info("模型已存在于列表")
+
+    if remove_col.button("🗑️ 删除模型", width='stretch', disabled=(selected_model == '')):
+        model_list = [path for path in model_list if path != selected_model]
+        registry['models'] = model_list
+        registry['last_selected'] = ''
+        save_model_registry(registry)
+        st.rerun()
+
+    if selected_model != registry.get('last_selected', ''):
+        registry['last_selected'] = selected_model
+        save_model_registry(registry)
+
+    return search_text, filters, selected_model
 
 
 def render_audio_info(audio_row):
@@ -617,6 +897,137 @@ def render_visualization(audio_id):
         st.error("❌ 无法生成可视化图表")
 
 
+def render_waveform_with_detection(audio_row, inference_result):
+    st.subheader("📈 音频波形时序图")
+    wav_path = Path(audio_row['wav_path'])
+    if not wav_path.exists():
+        st.warning(f"⚠️ 音频文件不存在: {wav_path}")
+        return
+
+    try:
+        waveform, sample_rate = torchaudio.load(str(wav_path))
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        waveform = waveform.squeeze(0).numpy()
+    except Exception as e:
+        st.error(f"读取音频失败: {e}")
+        return
+
+    if waveform.size == 0:
+        st.warning("⚠️ 波形为空，无法绘图")
+        return
+
+    time_axis = np.arange(waveform.shape[0], dtype=np.float32) / float(sample_rate)
+    fig, ax = plt.subplots(figsize=(14, 3))
+    ax.plot(time_axis, waveform, linewidth=0.6, color='#1f77b4')
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Amplitude")
+    ax.set_title(f"Waveform - {audio_row['utt_id']}")
+    ax.grid(alpha=0.3)
+    ax.set_xlim([0, float(time_axis[-1]) if len(time_axis) > 0 else 0.0])
+
+    triggered = bool(inference_result.get('triggered', False))
+    keyword = inference_result.get('keyword')
+    if triggered and isinstance(keyword, str):
+        keyword_norm = keyword.replace(' ', '')
+        if keyword_norm in INFER_WAKEWORDS:
+            display_name = WAKEWORD_DISPLAY.get(keyword_norm, keyword_norm)
+            end_time = inference_result.get('end_time_sec')
+            color = '#d62728' if keyword_norm == '嗨小问' else '#2ca02c'
+            y_max = float(np.max(np.abs(waveform)))
+            y_text = y_max * 0.85 if y_max > 1e-6 else 0.1
+
+            if end_time is not None:
+                end_time = float(end_time)
+                ax.axvline(end_time, color=color, linestyle=':', linewidth=2.0)
+                ax.text(
+                    end_time,
+                    y_text,
+                    f"{display_name} end @ {end_time:.2f}s",
+                    color=color,
+                    rotation=90,
+                    verticalalignment='bottom',
+                    horizontalalignment='left',
+                    fontsize=9,
+                    bbox={'facecolor': 'white', 'alpha': 0.7, 'edgecolor': color}
+                )
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def render_model_inference(audio_row, selected_model):
+    st.subheader("🧠 模型推理结果")
+    model_path = Path(selected_model)
+    if not model_path.exists():
+        st.error(f"模型不存在: {model_path}")
+        return
+
+    if model_path.suffix not in {'.pt', '.zip'}:
+        st.error("当前仅支持 .pt / .zip 模型推理")
+        return
+
+    config_path = _resolve_config_from_model(model_path)
+    if not config_path.exists():
+        st.error(f"模型配置不存在: {config_path}")
+        return
+
+    for file_path in [SCORE_CTC_SCRIPT, INFER_DICT_DIR / 'dict.txt',
+                      INFER_TOKEN_FILE, INFER_LEXICON_FILE]:
+        if not file_path.exists():
+            st.error(f"推理依赖文件不存在: {file_path}")
+            return
+
+    model_mtime = model_path.stat().st_mtime
+    config_mtime = config_path.stat().st_mtime
+    with st.spinner("正在执行单条音频推理..."):
+        infer_result = run_single_audio_inference(
+            model_path=str(model_path),
+            model_mtime=model_mtime,
+            config_mtime=config_mtime,
+            utt_id=str(audio_row['utt_id']),
+            wav_path=str(audio_row['wav_path']),
+            text_content=str(audio_row['text_content'] or ''),
+            duration=float(audio_row['duration']) if audio_row['duration'] is not None else 0.0,
+        )
+
+    if not infer_result.get('ok', False):
+        st.error(f"推理失败: {infer_result.get('error', '未知错误')}")
+        if infer_result.get('stderr'):
+            st.code(infer_result['stderr'], language='bash')
+        return
+
+    triggered = bool(infer_result.get('triggered', False))
+    keyword = infer_result.get('keyword')
+    score = infer_result.get('score')
+    end_time = infer_result.get('end_time_sec')
+
+    if triggered:
+        st.success(
+            f"检测结果: 触发 `{keyword}` (score={score:.3f})"
+            if isinstance(score, (int, float)) else
+            f"检测结果: 触发 `{keyword}`"
+        )
+    else:
+        st.info("检测结果: 未触发唤醒词")
+
+    info_col1, info_col2, info_col3 = st.columns(3)
+    info_col1.metric("触发状态", "Triggered" if triggered else "Rejected")
+    info_col2.metric(
+        "置信度",
+        f"{score:.3f}" if isinstance(score, (int, float)) else "-"
+    )
+    info_col3.metric(
+        "结束时刻(秒)",
+        f"{end_time:.3f}" if isinstance(end_time, (int, float)) else "-"
+    )
+    resolution = infer_result.get('time_resolution_sec')
+    if isinstance(resolution, (int, float)):
+        st.caption(f"时间分辨率: {resolution:.3f}s / frame (来自模型 config 的 frame_shift × frame_skip)")
+    st.caption("说明：CTC 前缀匹配的起始时刻常偏早，页面默认仅展示结束时刻。")
+
+    render_waveform_with_detection(audio_row, infer_result)
+
+
 # ==================== 主应用 ====================
 def main():
     st.title("🎵 音频数据浏览器")
@@ -629,7 +1040,7 @@ def main():
     filter_options = get_filter_options(conn)
     
     # 渲染侧边栏
-    search_text, filters = render_sidebar(filter_options)
+    search_text, filters, selected_model = render_sidebar(filter_options)
     
     # 主内容区
     st.markdown("---")
@@ -677,6 +1088,10 @@ def main():
     if 'current_page' not in st.session_state:
         st.session_state.current_page = 0
     
+    total_pages = max((total_count + page_size - 1) // page_size, 1)
+    if st.session_state.current_page >= total_pages:
+        st.session_state.current_page = total_pages - 1
+
     # 查询数据
     offset = st.session_state.current_page * page_size
     results = query_audio_files(conn, filters, search_text, limit=page_size, offset=offset)
@@ -712,8 +1127,6 @@ def main():
     # 分页控制
     col1, col2, col3, col4 = st.columns([1, 1, 2, 1])
     
-    total_pages = (total_count + page_size - 1) // page_size
-    
     with col1:
         if st.button("⬅️ 上一页", disabled=(st.session_state.current_page == 0)):
             st.session_state.current_page -= 1
@@ -730,6 +1143,24 @@ def main():
     with col4:
         if st.button("🔝 回到首页"):
             st.session_state.current_page = 0
+            st.rerun()
+
+    jump_hint_col, jump_col1, jump_col2, _ = st.columns([0.8, 0.9, 0.6, 7.7])
+    with jump_hint_col:
+        st.markdown("**跳页**")
+    with jump_col1:
+        jump_page = st.number_input(
+            "跳转到页码",
+            min_value=1,
+            max_value=total_pages,
+            value=st.session_state.current_page + 1,
+            step=1,
+            key='jump_to_page_number',
+            label_visibility='collapsed'
+        )
+    with jump_col2:
+        if st.button("🔢 跳转", width='stretch'):
+            st.session_state.current_page = int(jump_page) - 1
             st.rerun()
     
     # 选择音频查看详情
@@ -756,6 +1187,13 @@ def main():
         
         # 渲染可视化
         render_visualization(selected_audio_id)
+
+        st.markdown("---")
+
+        if selected_model:
+            render_model_inference(selected_row, selected_model)
+        else:
+            st.info("未选择推理模型：仅显示可视化。可在左侧“指定模型推理”中添加并选择模型。")
 
 
 if __name__ == "__main__":

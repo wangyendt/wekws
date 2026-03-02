@@ -17,6 +17,7 @@ echo ""
 
 # 检查数据库是否存在
 DB_PATH="$PROJECT_DIR/data/metadata.db"
+MODEL_REGISTRY_PATH="$PROJECT_DIR/wayne_scripts/webui_models.yaml"
 if [ ! -f "$DB_PATH" ]; then
     echo "❌ 数据库不存在！"
     echo ""
@@ -49,6 +50,7 @@ echo ""
 echo "🚀 启动 WebUI..."
 echo ""
 echo "浏览器将自动打开，或手动访问: http://localhost:8501"
+echo "模型下拉列表持久化文件: $MODEL_REGISTRY_PATH"
 echo "按 Ctrl+C 停止服务"
 echo "=========================================="
 echo ""
