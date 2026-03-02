@@ -99,3 +99,11 @@ python tools/stat_model_param_dtypes.py --workdir examples/hi_xiaowen/s0 --model
 python tools/stat_model_param_dtypes.py --workdir examples/hi_xiaowen/s0 --model exp/fsmn_ctc_distill_mini_align_20_test2/229_executorch_int8.pte --used_only
 # 3) hifi4 .pte（可看到 int8/int32 常量参数分布）
 python tools/stat_model_param_dtypes.py --workdir examples/hi_xiaowen/s0 --model exp/fsmn_ctc_distill_mini_align_20_test2/229_executorch_hifi4_int8.pte --used_only
+
+
+# 评估误唤醒率（负样本列表）
+cd ~/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0
+# 全量评估（推荐）
+bash ./evaluate_negative_list.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --audio_list /home/xushang/kws_ws/wekws/examples/hi_xiaowen/s0/datasets/mining_0207/audio_segments.list --dict_dir dict_top20 --gpu "0,1,2,3" --batch_size 256 --num_workers 8
+# 小样本快速验证（先跑 200 条）
+bash ./evaluate_negative_list.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --audio_list /home/xushang/kws_ws/wekws/examples/hi_xiaowen/s0/datasets/mining_0207/audio_segments.list --dict_dir dict_top20 --gpu 0 --batch_size 128 --num_workers 4 --max_samples 200
