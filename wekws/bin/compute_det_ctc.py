@@ -132,25 +132,33 @@ def load_stats_file(stats_file):
             if line.strip().startswith('#'):
                 continue
             arr = line.strip().split()
+            if len(arr) != 3:
+                continue
             threshold, fa_per_hour, frr = arr
             values.append([float(fa_per_hour), float(frr) * 100])
     values.reverse()
+    if len(values) == 0:
+        return np.empty((0, 2))
     return np.array(values)
 
 
 def plot_det(dets_dir, figure_file, xlim=5, x_step=1, ylim=35, y_step=5):
-    det_title = "DetCurve"
     plt.figure(dpi=200)
     plt.rcParams['xtick.direction'] = 'in'
     plt.rcParams['ytick.direction'] = 'in'
     plt.rcParams['font.size'] = 12
 
+    plot_num = 0
     for file in glob.glob(f'{dets_dir}/*stats*.txt'):
+        values = load_stats_file(file)
+        if values.size == 0:
+            logging.warning(f'skip empty det data from {file}')
+            continue
         logging.info(f'reading det data from {file}')
         label = os.path.basename(file).split('.')[1]
         label = "".join(pypinyin.lazy_pinyin(label))
-        values = load_stats_file(file)
         plt.plot(values[:, 0], values[:, 1], label=label)
+        plot_num += 1
 
     plt.xlim([0, xlim])
     plt.ylim([0, ylim])
@@ -159,7 +167,10 @@ def plot_det(dets_dir, figure_file, xlim=5, x_step=1, ylim=35, y_step=5):
     plt.xlabel('False Alarm Per Hour')
     plt.ylabel('False Rejection Rate (%)')
     plt.grid(linestyle='--')
-    plt.legend(loc='best', fontsize=6)
+    if plot_num > 0:
+        plt.legend(loc='best', fontsize=6)
+    else:
+        logging.warning(f'No valid DET stats found in {dets_dir}')
     plt.savefig(figure_file)
 
 
@@ -228,6 +239,12 @@ if __name__ == '__main__':
     keyword_filler_table = load_label_and_score(keywords_list, args.test_data,
                                                 args.score_file, true_keywords)
 
+    if args.stats_dir:
+        stats_dir = args.stats_dir
+    else:
+        stats_dir = os.path.dirname(args.score_file)
+
+    valid_keyword_num = 0
     for keyword in keywords_list:
         keyword = true_keywords[keyword]
         keyword = space_mixed_label(keyword)
@@ -235,22 +252,27 @@ if __name__ == '__main__':
         keyword_num = len(keyword_filler_table[keyword]['keyword_table'])
         filler_dur = keyword_filler_table[keyword]['filler_duration']
         filler_num = len(keyword_filler_table[keyword]['filler_table'])
-        assert keyword_num > 0, \
-            'Can\'t compute det for {} without positive sample'
-        assert filler_num > 0, \
-            'Can\'t compute det for {} without negative sample'
+        stats_file = os.path.join(
+            stats_dir, 'stats.' + keyword.replace(' ', '_') + '.txt')
 
+        if keyword_num <= 0 or filler_num <= 0:
+            with open(stats_file, 'w', encoding='utf8') as fout:
+                fout.write('# threshold fa_per_hour frr\n')
+                if keyword_num <= 0:
+                    fout.write(f'# skipped: {keyword} has no positive sample\n')
+                if filler_num <= 0:
+                    fout.write(f'# skipped: {keyword} has no negative sample\n')
+            logging.warning(
+                'Skip computing det for %s: positive=%d, negative=%d',
+                keyword, keyword_num, filler_num)
+            continue
+
+        valid_keyword_num += 1
         logging.info('Computing det for {}'.format(keyword))
         logging.info('  Keyword duration: {} Hours, wave number: {}'.format(
             keyword_dur / 3600.0, keyword_num))
         logging.info('  Filler duration: {} Hours'.format(filler_dur / 3600.0))
 
-        if args.stats_dir:
-            stats_dir = args.stats_dir
-        else:
-            stats_dir = os.path.dirname(args.score_file)
-        stats_file = os.path.join(
-            stats_dir, 'stats.' + keyword.replace(' ', '_') + '.txt')
         with open(stats_file, 'w', encoding='utf8') as fout:
             # 写入表头
             fout.write('# threshold fa_per_hour frr\n')
@@ -287,6 +309,11 @@ if __name__ == '__main__':
                 fout.write('{:.3f} {:.6f} {:.6f}\n'.format(
                     threshold, false_alarm_per_hour, false_reject_rate))
                 threshold += args.step
+
+    if valid_keyword_num <= 0:
+        raise RuntimeError(
+            'No keyword has both positive and negative samples, cannot plot DET')
+
     if args.det_curve_path:
         det_curve_path = args.det_curve_path
     else:
