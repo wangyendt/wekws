@@ -166,7 +166,7 @@ score_cmd=(python wekws/bin/score_ctc.py
     --dict "$dict_dir"
     --score_file "$score_file"
     --num_workers "$num_workers"
-    --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee"
+    --keywords "$keywords"
     --token_file "$token_file"
     --lexicon_file "$lexicon_file")
 
@@ -198,7 +198,7 @@ echo "🚀 Step 2: 计算 DET 曲线和评估指标..."
 echo ""
 
 python wekws/bin/compute_det_ctc.py \
-    --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee" \
+    --keywords "$keywords" \
     --test_data "$data_file" \
     --window_shift "$window_shift" \
     --step 0.001 \

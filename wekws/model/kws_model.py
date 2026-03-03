@@ -189,9 +189,11 @@ def init_model(configs):
         left_stride = configs['backbone']['left_stride']
         right_stride = configs['backbone']['right_stride']
         output_affine_dim = configs['backbone']['output_affine_dim']
+        merge_head = configs['backbone'].get('merge_head', False)
         backbone = FSMN(input_dim, input_affine_dim, num_layers, linear_dim,
                         proj_dim, left_order, right_order, left_stride,
-                        right_stride, output_affine_dim, output_dim)
+                        right_stride, output_affine_dim, output_dim,
+                        merge_head=merge_head)
 
     else:
         print('Unknown body type {}'.format(backbone_type))

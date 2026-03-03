@@ -26,6 +26,41 @@ import pypinyin  # for Chinese Character
 from wenet.text.char_tokenizer import CharTokenizer
 
 
+def _has_cjk(text):
+    return any('\u4e00' <= ch <= '\u9fff' for ch in text)
+
+
+def _try_fix_mojibake(text):
+    """Best-effort mojibake recovery for cases like 'å¨å°é®'."""
+    if not text or _has_cjk(text):
+        return text
+    try:
+        fixed = text.encode('latin1').decode('utf-8')
+        if _has_cjk(fixed):
+            return fixed
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    return text
+
+
+def _parse_keywords_arg(raw_keywords):
+    """Parse keywords arg robustly for both '\\uXXXX' and direct UTF-8 Chinese."""
+    if raw_keywords is None:
+        return []
+    text = raw_keywords.strip()
+    if not text:
+        return []
+
+    if '\\u' in text or '\\U' in text or '\\x' in text:
+        try:
+            text = text.encode('utf-8').decode('unicode_escape')
+        except UnicodeDecodeError:
+            pass
+
+    text = _try_fix_mojibake(text)
+    return [k.strip() for k in text.replace(' ', '').split(',') if k.strip()]
+
+
 
 def split_mixed_label(input_str):
     tokens = []
@@ -56,7 +91,8 @@ def load_label_and_score(keywords_list, label_file, score_file, true_keywords):
             key = arr[0]
             is_detected = arr[1]
             if is_detected == 'detected':
-                keyword = true_keywords[arr[2]]
+                raw_kw = _try_fix_mojibake(arr[2])
+                keyword = true_keywords.get(raw_kw, raw_kw)
                 if key not in score_table:
                     score_table.update({
                         key: {
@@ -142,14 +178,17 @@ def load_stats_file(stats_file):
     return np.array(values)
 
 
-def plot_det(dets_dir, figure_file, xlim=5, x_step=1, ylim=35, y_step=5):
+def plot_det(dets_dir, figure_file, xlim=5, x_step=1, ylim=35, y_step=5,
+             stats_files=None):
     plt.figure(dpi=200)
     plt.rcParams['xtick.direction'] = 'in'
     plt.rcParams['ytick.direction'] = 'in'
     plt.rcParams['font.size'] = 12
 
     plot_num = 0
-    for file in glob.glob(f'{dets_dir}/*stats*.txt'):
+    if stats_files is None:
+        stats_files = glob.glob(f'{dets_dir}/*stats*.txt')
+    for file in stats_files:
         values = load_stats_file(file)
         if values.size == 0:
             logging.warning(f'skip empty det data from {file}')
@@ -220,11 +259,11 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     window_shift = args.window_shift
-    logging.info(f"keywords is {args.keywords}, "
-                 f"Chinese is converted into Unicode.")
-
-    keywords = args.keywords.encode('utf-8').decode('unicode_escape')
-    keywords_list = keywords.strip().split(',')
+    logging.info(f'raw keywords arg: {args.keywords}')
+    keywords_list = _parse_keywords_arg(args.keywords)
+    if len(keywords_list) == 0:
+        raise ValueError('No valid keyword parsed from --keywords')
+    logging.info(f'parsed keywords: {keywords_list}')
 
     tokenizer = CharTokenizer(f'{args.dict}/dict.txt',
                               f'{args.dict}/words.txt',
@@ -234,7 +273,7 @@ if __name__ == '__main__':
     true_keywords = {}
     for keyword in keywords_list:
         strs, indexes = tokenizer.tokenize(' '.join(list(keyword)))
-        true_keywords[keyword] = ''.join(strs)
+        true_keywords[keyword] = _try_fix_mojibake(''.join(strs))
 
     keyword_filler_table = load_label_and_score(keywords_list, args.test_data,
                                                 args.score_file, true_keywords)
@@ -245,6 +284,7 @@ if __name__ == '__main__':
         stats_dir = os.path.dirname(args.score_file)
 
     valid_keyword_num = 0
+    generated_stats_files = []
     for keyword in keywords_list:
         keyword = true_keywords[keyword]
         keyword = space_mixed_label(keyword)
@@ -254,6 +294,7 @@ if __name__ == '__main__':
         filler_num = len(keyword_filler_table[keyword]['filler_table'])
         stats_file = os.path.join(
             stats_dir, 'stats.' + keyword.replace(' ', '_') + '.txt')
+        generated_stats_files.append(stats_file)
 
         if keyword_num <= 0 or filler_num <= 0:
             with open(stats_file, 'w', encoding='utf8') as fout:
@@ -319,4 +360,4 @@ if __name__ == '__main__':
     else:
         det_curve_path = os.path.join(stats_dir, 'det.png')
     plot_det(stats_dir, det_curve_path, args.xlim, args.x_step, args.ylim,
-             args.y_step)
+             args.y_step, stats_files=generated_stats_files)

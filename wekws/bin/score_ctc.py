@@ -37,6 +37,42 @@ from wekws.model.loss import ctc_prefix_beam_search
 from wenet.text.char_tokenizer import CharTokenizer
 
 
+def _has_cjk(text: str) -> bool:
+    return any('\u4e00' <= ch <= '\u9fff' for ch in text)
+
+
+def _try_fix_mojibake(text: str) -> str:
+    """Best-effort mojibake recovery for cases like 'å¨å°é®'."""
+    if not text or _has_cjk(text):
+        return text
+    try:
+        fixed = text.encode('latin1').decode('utf-8')
+        if _has_cjk(fixed):
+            return fixed
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    return text
+
+
+def _parse_keywords_arg(raw_keywords: str) -> List[str]:
+    """Parse keywords arg robustly for both '\\uXXXX' and direct UTF-8 Chinese."""
+    if raw_keywords is None:
+        return []
+    text = raw_keywords.strip()
+    if not text:
+        return []
+
+    # Decode only when unicode escape sequence is explicitly present.
+    if '\\u' in text or '\\U' in text or '\\x' in text:
+        try:
+            text = text.encode('utf-8').decode('unicode_escape')
+        except UnicodeDecodeError:
+            pass
+
+    text = _try_fix_mojibake(text)
+    return [k.strip() for k in text.replace(' ', '').split(',') if k.strip()]
+
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='recognize with your model')
@@ -351,11 +387,11 @@ def main():
 
     # 4. parse keywords tokens
     assert args.keywords is not None, 'at least one keyword is needed'
-    logging.info(f"keywords is {args.keywords}, "
-                 f"Chinese is converted into Unicode.")
-    keywords_str = args.keywords.encode('utf-8').decode('unicode_escape')
-    keywords_list = keywords_str.strip().replace(' ', '').split(',')
-    keywords_list = [k for k in keywords_list if k]
+    logging.info(f'raw keywords arg: {args.keywords}')
+    keywords_list = _parse_keywords_arg(args.keywords)
+    if len(keywords_list) == 0:
+        raise ValueError('No valid keyword parsed from --keywords')
+    logging.info(f'parsed keywords: {keywords_list}')
     keywords_token = {}
     keywords_idxset = {0}
     keywords_strset = {'<blk>'}

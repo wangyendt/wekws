@@ -215,6 +215,27 @@ v2 架构尝试（来自常用命令）：
 
 ---
 
+### 2.6 蒸馏 v3（合并 HEAD + 3 层）S1 首次结果
+
+实验：
+
+- `exp/fsmn_ctc_distill_s1_a64_p32_l3_merged/test_399`
+
+结果（`python analyze_exp_test_stats.py --test-id 399`）：
+
+| 实验 | 关键词 | threshold | accuracy | frr | fa/h | 备注 |
+|---|---|---:|---:|---:|---:|---|
+| distill_s1_a64_p32_l3_merged/test_399 | 你 好 问 问 | 0.000 | 97.58% | 2.42% | 0.54 | `legacy:fa<=target(1.0)` |
+| distill_s1_a64_p32_l3_merged/test_399 | 嗨 小 问 | 0.338 | 96.86% | 3.14% | 0.99 | `legacy:fa<=target(1.0)` |
+
+阶段性观察：
+
+1. S1 两个关键词均达到 `96%+`，其中“你好问问”在该阈值选择下达到 `97.58%`。
+2. 相比 `distill_v2_a64_p32_l2/test_299`，S1 在“你好问问”上有提升（97.58% vs 97.30%），在“嗨小问”上也有小幅提升（96.86% vs 96.42%）。
+3. 该结果来自 `test_399`，与此前常对比的 `test_299` 不同；后续建议在同一测试轮次做横向对齐对比。
+
+---
+
 ## 3. 方法-尝试-结果对应表（便于复盘）
 
 | 方法 | 具体做法 | 已做尝试 | 当前结论 |
@@ -223,6 +244,7 @@ v2 架构尝试（来自常用命令）：
 | 权重手术 | `checkpoint.py` 对 `out_linear2` 做 token 行拷贝 | top2598_weight_surgery、top440_weight_surgery、top20_weight_surgery | top20 最稳，显著减参且高精度 |
 | 蒸馏（199K） | 两阶段 feature alignment + HEAD 复制冻结/解冻 | test_179、test_229 | 可达 98% 左右，但调参成本高 |
 | 蒸馏 v2（113K） | 更小 backbone（a64_p32_l2）+ 200/100 训练 | 从头训、从199继续训 | 可用但略低于 199K |
+| 蒸馏 v3（S1 merged） | 合并 HEAD + 3 层结构蒸馏 | s1_a64_p32_l3_merged/test_399 | 当前优于 v2-113K，但距 199K 仍有差距 |
 | PTQ 量化 | INT8/INT16 + 校准 + evaluate | 229_int8、执行器导出路线 | INT8 损失可接受 |
 
 ---

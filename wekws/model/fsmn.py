@@ -413,6 +413,7 @@ class FSMN(nn.Module):
         rstride: int,
         output_affine_dim: int,
         output_dim: int,
+        merge_head: bool = False,
     ):
         """
             Args:
@@ -427,6 +428,12 @@ class FSMN(nn.Module):
                 rstride:                fsmn right stride
                 output_affine_dim:      output affine layer dimension
                 output_dim:             output dimension
+                merge_head:             if True, use a single linear_dim->output_dim
+                                        layer instead of two-layer HEAD
+                                        (linear_dim->output_affine_dim->output_dim).
+                                        The two consecutive linear layers are
+                                        mathematically equivalent to one; merging
+                                        saves ~33K params for output_dim=20.
         """
         super(FSMN, self).__init__()
 
@@ -452,8 +459,12 @@ class FSMN(nn.Module):
         self.fsmn = _build_repeats(fsmn_layers, linear_dim, proj_dim, lorder,
                                    rorder, lstride, rstride)
 
-        self.out_linear1 = AffineTransform(linear_dim, output_affine_dim)
-        self.out_linear2 = AffineTransform(output_affine_dim, output_dim)
+        if merge_head:
+            self.out_linear1 = None
+            self.out_linear2 = AffineTransform(linear_dim, output_dim)
+        else:
+            self.out_linear1 = AffineTransform(linear_dim, output_affine_dim)
+            self.out_linear2 = AffineTransform(output_affine_dim, output_dim)
         # self.softmax = nn.Softmax(dim = -1)
 
     def fuse_modules(self):
@@ -487,8 +498,11 @@ class FSMN(nn.Module):
         x4, _ = x3
         for layer, module in enumerate(self.fsmn):
             x4, in_cache[layer] = module((x4, in_cache[layer]))
-        x5 = self.out_linear1(x4)
-        x6 = self.out_linear2(x5)
+        if self.out_linear1 is not None:
+            x5 = self.out_linear1(x4)
+            x6 = self.out_linear2(x5)
+        else:
+            x6 = self.out_linear2(x4)
         # x7 = self.softmax(x6)
         x7, _ = x6
         # return x7, None
@@ -531,8 +545,11 @@ class FSMN(nn.Module):
         for layer, module in enumerate(self.fsmn):
             x4, in_cache[layer] = module((x4, in_cache[layer]))
             block_outputs.append(x4)
-        x5 = self.out_linear1(x4)
-        x6 = self.out_linear2(x5)
+        if self.out_linear1 is not None:
+            x5 = self.out_linear1(x4)
+            x6 = self.out_linear2(x5)
+        else:
+            x6 = self.out_linear2(x4)
         x7, _ = x6
         return x7, torch.cat(in_cache, dim=-1), block_outputs
 
@@ -549,7 +566,8 @@ class FSMN(nn.Module):
             re_str += fsmn[2].to_kaldi_net()
             re_str += fsmn[3].to_kaldi_net()
 
-        re_str += self.out_linear1.to_kaldi_net()
+        if self.out_linear1 is not None:
+            re_str += self.out_linear1.to_kaldi_net()
         re_str += self.out_linear2.to_kaldi_net()
         re_str += '<Softmax> %d %d\n' % (self.output_dim, self.output_dim)
         # re_str += '<!EndOfComponent>\n'
@@ -573,7 +591,8 @@ class FSMN(nn.Module):
                 fsmn[2].to_pytorch_net(fread)
                 fsmn[3].to_pytorch_net(fread)
 
-            self.out_linear1.to_pytorch_net(fread)
+            if self.out_linear1 is not None:
+                self.out_linear1.to_pytorch_net(fread)
             self.out_linear2.to_pytorch_net(fread)
 
             softmax_line = fread.readline()

@@ -193,42 +193,68 @@ def _load_teacher(config_path, checkpoint_path, device):
     return teacher_model, teacher_configs
 
 
+def _unwrap_model(model):
+    """Unwrap DistributedDataParallel to access the underlying module."""
+    return model.module if hasattr(model, 'module') else model
+
+
 def _copy_head_from_teacher(student_model, teacher_model):
-    """Copy HEAD (out_linear1 + out_linear2) from teacher to student.
+    """Copy HEAD from teacher to student.
 
-    Requires that student and teacher have matching dimensions:
-    - out_linear1: (linear_dim -> output_affine_dim) must be identical
-    - out_linear2: (output_affine_dim -> output_dim) must be identical
+    Two modes depending on whether the student uses merged HEAD:
+
+    1. Non-merged (out_linear1 is not None): copy out_linear1 and out_linear2
+       directly.  Requires matching dimensions.
+
+    2. Merged (out_linear1 is None): compute the product of teacher's two
+       output layers into a single layer:
+           W_merged = W2 @ W1,  b_merged = W2 @ b1 + b2
+       This is mathematically lossless because no activation exists between
+       the two teacher layers.
     """
-    # Get the raw model (unwrap DDP if needed)
-    s_backbone = student_model.module.backbone \
-        if hasattr(student_model, 'module') else student_model.backbone
-    t_backbone = teacher_model.module.backbone \
-        if hasattr(teacher_model, 'module') else teacher_model.backbone
+    s_backbone = _unwrap_model(student_model).backbone
+    t_backbone = _unwrap_model(teacher_model).backbone
 
-    # Copy out_linear1
-    s_ol1 = s_backbone.out_linear1.state_dict()
-    t_ol1 = t_backbone.out_linear1.state_dict()
-    for key in s_ol1:
-        if s_ol1[key].shape != t_ol1[key].shape:
-            raise ValueError(
-                f'out_linear1.{key} shape mismatch: '
-                f'student {s_ol1[key].shape} vs teacher {t_ol1[key].shape}. '
-                f'Ensure student output_affine_dim matches teacher.')
-    s_backbone.out_linear1.load_state_dict(t_ol1)
-    logging.info('Copied out_linear1 from teacher to student')
+    if s_backbone.out_linear1 is not None:
+        # --- Non-merged: direct copy ---
+        s_ol1 = s_backbone.out_linear1.state_dict()
+        t_ol1 = t_backbone.out_linear1.state_dict()
+        for key in s_ol1:
+            if s_ol1[key].shape != t_ol1[key].shape:
+                raise ValueError(
+                    f'out_linear1.{key} shape mismatch: '
+                    f'student {s_ol1[key].shape} vs '
+                    f'teacher {t_ol1[key].shape}. '
+                    f'Ensure student output_affine_dim matches teacher.')
+        s_backbone.out_linear1.load_state_dict(t_ol1)
+        logging.info('Copied out_linear1 from teacher to student')
 
-    # Copy out_linear2
-    s_ol2 = s_backbone.out_linear2.state_dict()
-    t_ol2 = t_backbone.out_linear2.state_dict()
-    for key in s_ol2:
-        if s_ol2[key].shape != t_ol2[key].shape:
-            raise ValueError(
-                f'out_linear2.{key} shape mismatch: '
-                f'student {s_ol2[key].shape} vs teacher {t_ol2[key].shape}. '
-                f'Ensure student num_keywords matches teacher output_dim.')
-    s_backbone.out_linear2.load_state_dict(t_ol2)
-    logging.info('Copied out_linear2 from teacher to student')
+        s_ol2 = s_backbone.out_linear2.state_dict()
+        t_ol2 = t_backbone.out_linear2.state_dict()
+        for key in s_ol2:
+            if s_ol2[key].shape != t_ol2[key].shape:
+                raise ValueError(
+                    f'out_linear2.{key} shape mismatch: '
+                    f'student {s_ol2[key].shape} vs '
+                    f'teacher {t_ol2[key].shape}. '
+                    f'Ensure student num_keywords matches teacher output_dim.')
+        s_backbone.out_linear2.load_state_dict(t_ol2)
+        logging.info('Copied out_linear2 from teacher to student')
+    else:
+        # --- Merged HEAD: compute W2@W1 and W2@b1+b2 ---
+        W1 = t_backbone.out_linear1.linear.weight  # (oaf_dim, linear_dim)
+        b1 = t_backbone.out_linear1.linear.bias     # (oaf_dim,)
+        W2 = t_backbone.out_linear2.linear.weight   # (output_dim, oaf_dim)
+        b2 = t_backbone.out_linear2.linear.bias     # (output_dim,)
+
+        W_merged = W2 @ W1        # (output_dim, linear_dim)
+        b_merged = W2 @ b1 + b2   # (output_dim,)
+
+        s_backbone.out_linear2.linear.weight.data.copy_(W_merged)
+        s_backbone.out_linear2.linear.bias.data.copy_(b_merged)
+        logging.info(
+            'Merged HEAD from teacher: W2@W1 %s, b merged %s',
+            list(W_merged.shape), list(b_merged.shape))
 
 
 def _freeze_head(model):
