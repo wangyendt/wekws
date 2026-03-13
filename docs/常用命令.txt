@@ -120,20 +120,23 @@ bash ./evaluate_negative_list.sh --checkpoint exp/fsmn_ctc_distill_mini_align_20
 
 # S1: ~97K参数（同a64_p32_l3 backbone，仅合并HEAD验证方法可行性）
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s1_a64_p32_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s1_a64_p32_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3
+bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s1_a64_p32_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
 
 # S2: ~85K参数（缩小 input_affine_dim=56, proj_dim=28）
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s2_a56_p28_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s2_a56_p28_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3
+bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s2_a56_p28_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
 
 # S3: ~74K参数（缩小 input_affine_dim=48, proj_dim=24）
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s3_a48_p24_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s3_a48_p24_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3
+bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
 
 # S4: ~63K参数（缩小 input_affine_dim=40, proj_dim=20）
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s4_a40_p20_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s4_a40_p20_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3
+bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s4_a40_p20_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
 
 # S5: ~51K参数（缩小 input_affine_dim=32, proj_dim=16，极限压缩）
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s5_a32_p16_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s5_a32_p16_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3
+bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s5_a32_p16_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
 
-# v3 模型评估（以 S1 为例，399.pt 或 avg_30.pt 均可）
-bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s1_a64_p32_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
 # v3 模型统计
 python analyze_exp_test_stats.py --test-id 399

@@ -215,24 +215,58 @@ v2 架构尝试（来自常用命令）：
 
 ---
 
-### 2.6 蒸馏 v3（合并 HEAD + 3 层）S1 首次结果
+### 2.6 蒸馏 v3（merged HEAD + 3 层）S1-S5 横向结果
 
-实验：
+这 5 组实验做的事情本质一致，都是在蒸馏 v3 路线上继续压缩学生 backbone，只改变学生宽度；公共训练设置如下（见 `docs/常用命令.txt` 第 122-139 行）：
 
-- `exp/fsmn_ctc_distill_s1_a64_p32_l3_merged/test_399`
+1. teacher 固定为 `exp/fsmn_ctc_top20_weight_surgery/79.pt`，即 top20 权重手术后的高精度老师。
+2. 词表固定为 `dict_top20`，输出维度固定为 20。
+3. 训练策略固定为 `align_epochs=300 + finetune_epochs=100`，比 v2 的 `200 + 100` 更长。
+4. 蒸馏对齐固定为 `layer_mapping="0:1,1:2,2:3"`，对应 3 层学生去对齐老师后 3 层。
+5. 学习率策略固定为 `finetune_lr=1e-4`、`head_lr_ratio=0.1`、`lr_scheduler=none`。
+6. 结构上都启用了 `merge_head=true`，目标是把 HEAD 融入更紧凑的 3 层学生结构，而不是沿用 v2 的独立较大头部。
+
+每个实验具体改了什么、参数量多少：
+
+| 实验 | student_config | 具体改动 | 参数量 |
+|---|---|---|---:|
+| S1 | `s1_a64_p32_l3_merged` | 3 层 merged 结构里最大的学生，`input_affine_dim=64`、`proj_dim=32` | ~96,836 |
+| S2 | `s2_a56_p28_l3_merged` | 在 S1 基础上缩小宽度到 `56/28` | ~85,484 |
+| S3 | `s3_a48_p24_l3_merged` | 继续缩小宽度到 `48/24` | ~74,132 |
+| S4 | `s4_a40_p20_l3_merged` | 继续缩小宽度到 `40/20` | ~62,780 |
+| S5 | `s5_a32_p16_l3_merged` | 最小版本，宽度缩到 `32/16` | ~51,428 |
+
+参数量证据来自对应配置文件头注释：
+
+- `conf/fsmn_ctc_student_s1_a64_p32_l3_merged.yaml`
+- `conf/fsmn_ctc_student_s2_a56_p28_l3_merged.yaml`
+- `conf/fsmn_ctc_student_s3_a48_p24_l3_merged.yaml`
+- `conf/fsmn_ctc_student_s4_a40_p20_l3_merged.yaml`
+- `conf/fsmn_ctc_student_s5_a32_p16_l3_merged.yaml`
 
 结果（`python analyze_exp_test_stats.py --test-id 399`）：
 
-| 实验 | 关键词 | threshold | accuracy | frr | fa/h | 备注 |
-|---|---|---:|---:|---:|---:|---|
-| distill_s1_a64_p32_l3_merged/test_399 | 你 好 问 问 | 0.000 | 97.58% | 2.42% | 0.54 | `legacy:fa<=target(1.0)` |
-| distill_s1_a64_p32_l3_merged/test_399 | 嗨 小 问 | 0.338 | 96.86% | 3.14% | 0.99 | `legacy:fa<=target(1.0)` |
+| 实验 | 参数量 | 关键词 | threshold | accuracy | frr | fa/h | 备注 |
+|---|---:|---|---:|---:|---:|---:|---|
+| distill_s1_a64_p32_l3_merged/test_399 | 96,836 | 你 好 问 问 | 0.000 | 97.58% | 2.42% | 0.54 | `legacy:fa<=target(1.0)` |
+| distill_s1_a64_p32_l3_merged/test_399 | 96,836 | 嗨 小 问 | 0.338 | 96.86% | 3.14% | 0.99 | `legacy:fa<=target(1.0)` |
+| distill_s2_a56_p28_l3_merged/test_399 | 85,484 | 你 好 问 问 | 0.000 | 97.45% | 2.55% | 0.45 | `legacy:fa<=target(1.0)` |
+| distill_s2_a56_p28_l3_merged/test_399 | 85,484 | 嗨 小 问 | 0.417 | 96.44% | 3.56% | 0.99 | `legacy:fa<=target(1.0)` |
+| distill_s3_a48_p24_l3_merged/test_399 | 74,132 | 你 好 问 问 | 0.016 | 97.66% | 2.34% | 0.53 | `legacy:fa<=target(1.0)` |
+| distill_s3_a48_p24_l3_merged/test_399 | 74,132 | 嗨 小 问 | 0.272 | 96.75% | 3.25% | 0.99 | `legacy:fa<=target(1.0)` |
+| distill_s4_a40_p20_l3_merged/test_399 | 62,780 | 你 好 问 问 | 0.000 | 96.98% | 3.02% | 0.67 | `legacy:fa<=target(1.0)` |
+| distill_s4_a40_p20_l3_merged/test_399 | 62,780 | 嗨 小 问 | 0.423 | 95.53% | 4.47% | 0.99 | `legacy:fa<=target(1.0)` |
+| distill_s5_a32_p16_l3_merged/test_399 | 51,428 | 你 好 问 问 | 0.000 | 96.83% | 3.17% | 0.93 | `legacy:fa<=target(1.0)` |
+| distill_s5_a32_p16_l3_merged/test_399 | 51,428 | 嗨 小 问 | 0.520 | 93.40% | 6.60% | 0.98 | `legacy:fa<=target(1.0)` |
 
 阶段性观察：
 
-1. S1 两个关键词均达到 `96%+`，其中“你好问问”在该阈值选择下达到 `97.58%`。
-2. 相比 `distill_v2_a64_p32_l2/test_299`，S1 在“你好问问”上有提升（97.58% vs 97.30%），在“嗨小问”上也有小幅提升（96.86% vs 96.42%）。
-3. 该结果来自 `test_399`，与此前常对比的 `test_299` 不同；后续建议在同一测试轮次做横向对齐对比。
+1. S1-S3 都维持在两个关键词 `96%+` 的可用区间，说明 merged HEAD + 3 层蒸馏路线在 `74K-97K` 参数段内是成立的。
+2. `你 好 问 问` 上最好的是 S3（`97.66%`），且参数量比 S1 少约 `22.7K`；说明这条线上不是“越大越好”，中等宽度有更优甜点。
+3. `嗨 小 问` 上最好的是 S1（`96.86%`），S3 非常接近（`96.75%`）；如果更看重综合平衡，S3 更像当前最佳折中点。
+4. 从 S3 往下继续压到 S4/S5 后退化明显，尤其 S5 的“嗨小问”降到 `93.40%`，说明 `32/16` 这一档已经过窄。
+5. 相比 `distill_v2_a64_p32_l2/test_299`（113,142 参数），S1 和 S3 都在更少参数下取得更好结果；其中 S3 约 `74K` 参数，已经明显优于 v2-113K。
+6. 这些结果都来自 `test_399`，因此和前文 `test_299` 的 v2 结论只能做趋势参考；若要严格结论，仍建议补一轮同测试集对齐评测。
 
 ---
 
@@ -244,7 +278,7 @@ v2 架构尝试（来自常用命令）：
 | 权重手术 | `checkpoint.py` 对 `out_linear2` 做 token 行拷贝 | top2598_weight_surgery、top440_weight_surgery、top20_weight_surgery | top20 最稳，显著减参且高精度 |
 | 蒸馏（199K） | 两阶段 feature alignment + HEAD 复制冻结/解冻 | test_179、test_229 | 可达 98% 左右，但调参成本高 |
 | 蒸馏 v2（113K） | 更小 backbone（a64_p32_l2）+ 200/100 训练 | 从头训、从199继续训 | 可用但略低于 199K |
-| 蒸馏 v3（S1 merged） | 合并 HEAD + 3 层结构蒸馏 | s1_a64_p32_l3_merged/test_399 | 当前优于 v2-113K，但距 199K 仍有差距 |
+| 蒸馏 v3（S1-S5 merged） | 合并 HEAD + 3 层结构蒸馏，仅缩学生宽度 | s1-s5_a{64,56,48,40,32}_p{32,28,24,20,16}_l3_merged/test_399 | S1-S3 可用，其中 S3（74K）是当前精度/参数最佳折中 |
 | PTQ 量化 | INT8/INT16 + 校准 + evaluate | 229_int8、执行器导出路线 | INT8 损失可接受 |
 
 ---
@@ -254,6 +288,7 @@ v2 架构尝试（来自常用命令）：
 1. 常用命令：`docs/常用命令.txt`
    - v2 从头：第 26 行
    - v2 从 199 继续：第 29 行
+   - v3 S1-S5：第 122-139 行
 2. 两个目标日志：
    - `exp/fsmn_ctc_distill_v2_a64_p32_l2/logs/run_distill_stage_2_3_20260228_205342.log`
    - `exp/fsmn_ctc_distill_v2_a64_p32_l2_ft_from199_lr1e4/logs/run_distill_stage_2_2_20260302_113805.log`
@@ -262,5 +297,5 @@ v2 架构尝试（来自常用命令）：
    - top20 surgery: `exp/fsmn_ctc_top20_weight_surgery/logs/run_stage_2_2_20260206_195135.log`（392,494）
    - distill 199K: `exp/fsmn_ctc_distill_mini_align_20_test2/logs/run_distill_stage_2_2_20260210_130428.log`（199,760）
    - distill v2 113K: 上述两个 v2 日志（113,142）
+   - distill v3 S1-S5: `conf/fsmn_ctc_student_s{1,2,3,4,5}_a*_merged.yaml` 文件头注释（96,836 / 85,484 / 74,132 / 62,780 / 51,428）
 4. 统计脚本：`examples/hi_xiaowen/s0/analyze_exp_test_stats.py`
-
