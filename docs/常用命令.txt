@@ -129,6 +129,8 @@ bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s2_a56_p28_l3_merged/399.pt
 # S3: ~74K参数（缩小 input_affine_dim=48, proj_dim=24）
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s3_a48_p24_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s3_a48_p24_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
+python ./evaluate_infer_wav.py --model s3 --test_data data/test/data.list --gpus 0,1,2,3
+python ./evaluate_infer_wav.py --model s3 --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000
 
 # S4: ~63K参数（缩小 input_affine_dim=40, proj_dim=20）
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s4_a40_p20_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s4_a40_p20_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3
