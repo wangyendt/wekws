@@ -48,7 +48,7 @@ DEFAULT_KEYWORDS = "嗨小问,你好问问"
 DEFAULT_MODEL_ALIAS = "s3"
 DEFAULT_DIAGNOSE_BEAM_SIZE = 5
 DEFAULT_DIAGNOSE_FRAME_TOPK = 5
-DIAGNOSIS_CACHE_VERSION = "v2_token_traces_heatmap"
+DIAGNOSIS_CACHE_VERSION = "v3_keyword_diagnostics"
 MODEL_SUMMARY = {
     "top20": {
         "title": "Top20 权重手术老师模型",
@@ -747,8 +747,68 @@ def format_diag_hyp_df(hyps: List[Dict], include_match: bool) -> pd.DataFrame:
         if include_match:
             row["matched_keyword"] = hyp.get("matched_keyword")
             row["candidate_score"] = hyp.get("candidate_score")
+            row["threshold"] = hyp.get("threshold")
+            row["score_margin"] = hyp.get("score_margin")
+            row["weakest_token"] = hyp.get("weakest_token")
+            row["weakest_token_prob"] = hyp.get("weakest_token_prob")
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def format_keyword_diag_df(keyword_diagnostics: List[Dict], time_resolution_sec: float) -> pd.DataFrame:
+    rows = []
+    status_map = {
+        "triggered": "已触发",
+        "below_threshold": "已成词但低于阈值",
+        "no_complete_match": "未形成完整关键词",
+        "matched_without_threshold": "已成词但无阈值",
+    }
+    for item in keyword_diagnostics:
+        start_frame = item.get("candidate_start_frame")
+        end_frame = item.get("candidate_end_frame")
+        if isinstance(start_frame, int) and isinstance(end_frame, int):
+            span_text = f"{start_frame * time_resolution_sec:.2f}-{end_frame * time_resolution_sec:.2f}s"
+        else:
+            span_text = "-"
+        rows.append(
+            {
+                "keyword": item.get("keyword"),
+                "tokens": " ".join(item.get("keyword_tokens", [])),
+                "status": status_map.get(item.get("status"), item.get("status")),
+                "best_rank": item.get("best_rank"),
+                "candidate_score": item.get("candidate_score"),
+                "threshold": item.get("threshold"),
+                "score_margin": item.get("score_margin"),
+                "weakest_token": item.get("weakest_token"),
+                "weakest_token_prob": item.get("weakest_token_prob"),
+                "candidate_span": span_text,
+                "best_text": item.get("best_text"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def pick_visual_keyword_candidate(diagnosis: Dict) -> Optional[Dict]:
+    infer_result = diagnosis.get("infer_result", {})
+    keyword_diagnostics = diagnosis.get("keyword_diagnostics", [])
+    if infer_result.get("triggered"):
+        triggered_keyword = infer_result.get("keyword")
+        return next(
+            (
+                item for item in keyword_diagnostics
+                if item.get("keyword") == triggered_keyword and item.get("status") == "triggered"
+            ),
+            None,
+        )
+
+    below_threshold = [item for item in keyword_diagnostics if item.get("status") == "below_threshold"]
+    if below_threshold:
+        return max(
+            below_threshold,
+            key=lambda item: item.get("candidate_score") if isinstance(item.get("candidate_score"), (int, float)) else float("-inf"),
+        )
+
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -785,6 +845,7 @@ def render_waveform_keyword_plot(record: Dict, diagnosis: Dict) -> None:
     keyword_beam_topk = diagnosis.get("keyword_beam_topk", [])
     matched_hyp = next((item for item in keyword_beam_topk if item.get("matched_keyword")), None)
     visual_hyp = matched_hyp if matched_hyp is not None else (keyword_beam_topk[0] if keyword_beam_topk else None)
+    visual_candidate = pick_visual_keyword_candidate(diagnosis)
 
     fig, ax = plt.subplots(figsize=(8.6, 3.2))
     ax.plot(wav_data["times"], wav_data["amplitude"], color="#2563eb", linewidth=0.8)
@@ -792,6 +853,17 @@ def render_waveform_keyword_plot(record: Dict, diagnosis: Dict) -> None:
     ax.set_xlabel("时间 (s)")
     ax.set_ylabel("振幅")
     ax.grid(alpha=0.18)
+
+    candidate_start_frame = visual_candidate.get("candidate_start_frame") if visual_candidate is not None else None
+    candidate_end_frame = visual_candidate.get("candidate_end_frame") if visual_candidate is not None else None
+    if isinstance(candidate_start_frame, int) and isinstance(candidate_end_frame, int):
+        ax.axvspan(
+            candidate_start_frame * time_resolution_sec,
+            candidate_end_frame * time_resolution_sec,
+            color="#f59e0b",
+            alpha=0.16,
+            label="关键词候选区间",
+        )
 
     start_time = infer_result.get("start_time_sec")
     end_time = infer_result.get("end_time_sec")
@@ -809,7 +881,11 @@ def render_waveform_keyword_plot(record: Dict, diagnosis: Dict) -> None:
             ax.axvline(token_time, color="#f59e0b", alpha=0.55, linewidth=1.2)
             ax.text(token_time, y_anchor, token, rotation=90, va="bottom", ha="center", fontsize=9, color="#92400e")
 
-    if matched_hyp is not None and matched_hyp.get("matched_keyword"):
+    if (
+        (matched_hyp is not None and matched_hyp.get("matched_keyword"))
+        or (isinstance(candidate_start_frame, int) and isinstance(candidate_end_frame, int))
+        or (isinstance(start_time, (int, float)) and isinstance(end_time, (int, float)))
+    ):
         ax.legend(loc="upper right")
 
     st.pyplot(fig, use_container_width=True)
@@ -896,15 +972,21 @@ def render_beam_timeline_plot(diagnosis: Dict) -> None:
         matched_keyword = hyp.get("matched_keyword")
         path_score = hyp.get("path_score")
         candidate_score = hyp.get("candidate_score")
+        threshold = hyp.get("threshold")
         label_text = matched_keyword or hyp.get("text", "") or f"rank{rank}"
         score_text = f"path={path_score:.3f}" if isinstance(path_score, (int, float)) else "path=-"
         if isinstance(candidate_score, (int, float)):
             score_text += f", cand={candidate_score:.3f}"
+        if isinstance(threshold, (int, float)):
+            score_text += f", thr={threshold:.3f}"
         y_labels.append(f"#{rank} {label_text} [{score_text}]")
         frames = hyp.get("frames", [])
         token_times = [frame * time_resolution_sec for frame in frames]
         tokens = hyp.get("tokens", [])
-        color = "#10b981" if matched_keyword else "#3b82f6"
+        if matched_keyword and isinstance(candidate_score, (int, float)) and isinstance(threshold, (int, float)):
+            color = "#10b981" if candidate_score >= threshold else "#f59e0b"
+        else:
+            color = "#3b82f6" if not matched_keyword else "#14b8a6"
         ax.plot(token_times, [y_value] * len(token_times), color=color, linewidth=1.2, alpha=0.9)
         ax.scatter(token_times, [y_value] * len(token_times), color=color, s=28)
         for token_time, token in zip(token_times, tokens):
@@ -967,10 +1049,15 @@ def render_diagnosis_section(record: Dict, gpu: int) -> None:
     greedy_decode = diagnosis.get("greedy_decode", {})
     beam_topk = diagnosis.get("beam_topk", [])
     keyword_beam_topk = diagnosis.get("keyword_beam_topk", [])
+    keyword_diagnostics = diagnosis.get("keyword_diagnostics", [])
+    decode_assessment = diagnosis.get("decode_assessment", {})
     mean_frame_topk_tokens = diagnosis.get("mean_frame_topk_tokens", [])
     matched_hyp = next((item for item in keyword_beam_topk if item.get("matched_keyword")), None)
+    time_resolution_sec = float(diagnosis.get("time_resolution_sec") or 0.03)
+    best_keyword_row = pick_visual_keyword_candidate(diagnosis)
 
     summary_rows = [
+        {"字段": "整体判断", "值": decode_assessment.get("message") or "-"},
         {"字段": "Greedy 文本", "值": greedy_decode.get("text") or "(空)"},
         {"字段": "Beam Top1", "值": beam_topk[0].get("text") if beam_topk else "(空)"},
         {
@@ -982,11 +1069,25 @@ def render_diagnosis_section(record: Dict, gpu: int) -> None:
             "值": matched_hyp.get("text") if matched_hyp else (keyword_beam_topk[0].get("text") if keyword_beam_topk else "(空)"),
         },
     ]
+    if best_keyword_row is not None:
+        summary_rows.append(
+            {
+                "字段": "最强候选阈值差",
+                "值": (
+                    f"{best_keyword_row.get('keyword')}: "
+                    f"{best_keyword_row.get('score_margin'):.3f}"
+                    if isinstance(best_keyword_row.get("score_margin"), (int, float))
+                    else "-"
+                ),
+            }
+        )
     st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
     st.caption("说明：`path_score` 是 beam 内部路径排序分数；`candidate_score` 只对已形成完整关键词的路径计算，并会拿去和阈值比较。")
 
-    if not matched_hyp and not diagnosis.get("infer_result", {}).get("triggered"):
-        st.warning("这条录音在关键词约束 beam 下也没有形成完整关键词子串，更像是发音/声学条件偏移，而不是单纯阈值太高。")
+    if decode_assessment.get("status") == "no_complete_match":
+        st.warning("这条录音在关键词约束 beam 下也没有形成完整关键词子串，更像是发音/声学条件偏移，或 beam 没保住关键路径，而不是单纯阈值太高。")
+    elif decode_assessment.get("status") == "below_threshold":
+        st.warning("这条录音已经形成完整关键词，但 candidate_score 仍低于阈值。优先检查阈值、弱 token 概率和该关键词对应训练样本覆盖。")
 
     st.markdown("###### 可视化")
     render_waveform_keyword_plot(record, diagnosis)
@@ -996,6 +1097,9 @@ def render_diagnosis_section(record: Dict, gpu: int) -> None:
 
     col1, col2 = st.columns([1.0, 1.3], gap="large")
     with col1:
+        st.markdown("###### 关键词诊断")
+        keyword_diag_df = format_keyword_diag_df(keyword_diagnostics, time_resolution_sec)
+        st.dataframe(keyword_diag_df, use_container_width=True, hide_index=True)
         st.markdown("###### 音频统计")
         st.dataframe(
             pd.DataFrame([{"字段": key, "值": value} for key, value in audio_stats.items()]),

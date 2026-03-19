@@ -212,6 +212,66 @@ def build_visual_token_ids(
     return ordered_ids
 
 
+def build_keyword_match_info(
+    prefix_ids: List[int],
+    nodes: List[Dict],
+    keywords: List[str],
+    keywords_token: Dict[str, Dict[str, Tuple[int, ...]]],
+    id2tok: Dict[int, str],
+) -> Dict:
+    matched_keyword = None
+    matched_range = None
+    candidate_score = None
+    token_probs: List[float] = []
+    matched_frames: List[int] = []
+    matched_tokens: List[str] = []
+    candidate_start_frame = None
+    candidate_end_frame = None
+    weakest_token = None
+    weakest_token_prob = None
+    weakest_token_frame = None
+
+    for keyword in keywords:
+        label = keywords_token[keyword]["token_id"]
+        offset = iw.is_sublist(prefix_ids, label)
+        if offset == -1:
+            continue
+
+        matched_keyword = keyword
+        matched_range = [offset, offset + len(label) - 1]
+        score = 1.0
+        for idx in range(offset, offset + len(label)):
+            prob = float(nodes[idx]["prob"])
+            frame = int(nodes[idx]["frame"])
+            token_probs.append(prob)
+            matched_frames.append(frame)
+            score *= prob
+        matched_tokens = [id2tok.get(int(token_id), f"<unk:{token_id}>") for token_id in label]
+        candidate_score = score ** 0.5
+        candidate_start_frame = matched_frames[0]
+        candidate_end_frame = matched_frames[-1]
+        if token_probs:
+            weakest_index = min(range(len(token_probs)), key=lambda index: token_probs[index])
+            weakest_token = matched_tokens[weakest_index]
+            weakest_token_prob = token_probs[weakest_index]
+            weakest_token_frame = matched_frames[weakest_index]
+        break
+
+    return {
+        "matched_keyword": matched_keyword,
+        "matched_range": matched_range,
+        "candidate_score": candidate_score,
+        "token_probs": token_probs,
+        "matched_frames": matched_frames,
+        "matched_tokens": matched_tokens,
+        "candidate_start_frame": candidate_start_frame,
+        "candidate_end_frame": candidate_end_frame,
+        "weakest_token": weakest_token,
+        "weakest_token_prob": weakest_token_prob,
+        "weakest_token_frame": weakest_token_frame,
+    }
+
+
 def summarize_beam_hyps(
     probs: torch.Tensor,
     id2tok: Dict[int, str],
@@ -241,44 +301,35 @@ def summarize_beam_hyps(
     return results
 
 
-def summarize_keyword_beam_hyps(
+def decode_keyword_beam_hyps(
     probs: torch.Tensor,
     keywords: List[str],
     keywords_token: Dict[str, Dict[str, Tuple[int, ...]]],
     keywords_idxset,
     id2tok: Dict[int, str],
-    beam_size: int,
+    threshold_map: Dict[str, Optional[float]],
 ) -> List[Dict]:
     hyps = ctc_prefix_beam_search(
         probs,
         int(probs.size(0)),
         keywords_tokenset=keywords_idxset,
-        score_beam_size=max(beam_size, 5),
-        path_beam_size=max(beam_size, 20),
+        score_beam_size=8,
+        path_beam_size=40,
         prob_threshold=0.0,
     )
     results = []
-    for prefix_ids, path_score, nodes in hyps[:beam_size]:
+    for prefix_ids, path_score, nodes in hyps:
         token_ids = list(prefix_ids)
         text, toks = ids_to_text(token_ids, id2tok)
-        matched_keyword = None
-        matched_range = None
-        candidate_score = None
-        token_probs = []
-        for keyword in keywords:
-            label = keywords_token[keyword]["token_id"]
-            offset = iw.is_sublist(prefix_ids, label)
-            if offset == -1:
-                continue
-            matched_keyword = keyword
-            matched_range = [offset, offset + len(label) - 1]
-            score = 1.0
-            for idx in range(offset, offset + len(label)):
-                prob = float(nodes[idx]["prob"])
-                token_probs.append(prob)
-                score *= prob
-            candidate_score = score ** 0.5
-            break
+        match_info = build_keyword_match_info(token_ids, nodes, keywords, keywords_token, id2tok)
+        threshold = None
+        score_margin = None
+        matched_keyword = match_info["matched_keyword"]
+        candidate_score = match_info["candidate_score"]
+        if matched_keyword is not None:
+            threshold = threshold_map.get(matched_keyword)
+            if isinstance(candidate_score, (int, float)) and isinstance(threshold, (int, float)):
+                score_margin = float(candidate_score - threshold)
         results.append(
             {
                 "token_ids": token_ids,
@@ -286,13 +337,123 @@ def summarize_keyword_beam_hyps(
                 "text": text,
                 "path_score": float(path_score),
                 "matched_keyword": matched_keyword,
-                "matched_range": matched_range,
+                "matched_range": match_info["matched_range"],
                 "candidate_score": candidate_score,
-                "token_probs": token_probs,
+                "token_probs": match_info["token_probs"],
+                "matched_frames": match_info["matched_frames"],
+                "matched_tokens": match_info["matched_tokens"],
+                "candidate_start_frame": match_info["candidate_start_frame"],
+                "candidate_end_frame": match_info["candidate_end_frame"],
+                "weakest_token": match_info["weakest_token"],
+                "weakest_token_prob": match_info["weakest_token_prob"],
+                "weakest_token_frame": match_info["weakest_token_frame"],
+                "threshold": threshold,
+                "score_margin": score_margin,
                 "frames": [int(node["frame"]) for node in nodes],
             }
         )
     return results
+
+
+def summarize_keyword_beam_hyps(
+    keyword_beam_hyps: List[Dict],
+    beam_size: int,
+) -> List[Dict]:
+    return keyword_beam_hyps[:beam_size]
+
+
+def summarize_keyword_diagnostics(
+    keyword_beam_hyps: List[Dict],
+    keywords: List[str],
+    keywords_token: Dict[str, Dict[str, Tuple[int, ...]]],
+    id2tok: Dict[int, str],
+    threshold_map: Dict[str, Optional[float]],
+) -> List[Dict]:
+    rows = []
+    for keyword in keywords:
+        label = keywords_token[keyword]["token_id"]
+        keyword_tokens = [id2tok.get(int(token_id), f"<unk:{token_id}>") for token_id in label]
+        best_hyp = None
+        best_rank = None
+        for rank, hyp in enumerate(keyword_beam_hyps, start=1):
+            if hyp.get("matched_keyword") != keyword:
+                continue
+            best_hyp = hyp
+            best_rank = rank
+            break
+
+        threshold = threshold_map.get(keyword)
+        status = "no_complete_match"
+        score_margin = None
+        if best_hyp is not None:
+            candidate_score = best_hyp.get("candidate_score")
+            if isinstance(candidate_score, (int, float)) and isinstance(threshold, (int, float)):
+                score_margin = float(candidate_score - threshold)
+                status = "triggered" if candidate_score >= threshold else "below_threshold"
+            elif isinstance(candidate_score, (int, float)):
+                status = "matched_without_threshold"
+
+        rows.append(
+            {
+                "keyword": keyword,
+                "keyword_tokens": keyword_tokens,
+                "threshold": threshold,
+                "status": status,
+                "best_rank": best_rank,
+                "best_text": best_hyp.get("text") if best_hyp is not None else None,
+                "path_score": best_hyp.get("path_score") if best_hyp is not None else None,
+                "candidate_score": best_hyp.get("candidate_score") if best_hyp is not None else None,
+                "score_margin": score_margin,
+                "matched_frames": best_hyp.get("matched_frames") if best_hyp is not None else [],
+                "matched_tokens": best_hyp.get("matched_tokens") if best_hyp is not None else [],
+                "token_probs": best_hyp.get("token_probs") if best_hyp is not None else [],
+                "candidate_start_frame": best_hyp.get("candidate_start_frame") if best_hyp is not None else None,
+                "candidate_end_frame": best_hyp.get("candidate_end_frame") if best_hyp is not None else None,
+                "weakest_token": best_hyp.get("weakest_token") if best_hyp is not None else None,
+                "weakest_token_prob": best_hyp.get("weakest_token_prob") if best_hyp is not None else None,
+                "weakest_token_frame": best_hyp.get("weakest_token_frame") if best_hyp is not None else None,
+            }
+        )
+    return rows
+
+
+def summarize_decode_assessment(keyword_diagnostics: List[Dict], infer_result: Dict) -> Dict:
+    if infer_result.get("triggered"):
+        keyword = infer_result.get("keyword") or infer_result.get("candidate_keyword")
+        return {
+            "status": "triggered",
+            "keyword": keyword,
+            "message": f"已触发关键词 {keyword}，当前主要看触发时间和 token 稳定性。",
+        }
+
+    below_threshold = [item for item in keyword_diagnostics if item.get("status") == "below_threshold"]
+    if below_threshold:
+        best_item = max(
+            below_threshold,
+            key=lambda item: item.get("candidate_score") if isinstance(item.get("candidate_score"), (int, float)) else float("-inf"),
+        )
+        online_candidate_keyword = infer_result.get("candidate_keyword")
+        if online_candidate_keyword is None:
+            message = (
+                f"诊断 beam 能拼出完整关键词 {best_item.get('keyword')}，但线上推理没有保住该路径；"
+                f"同时 candidate_score {best_item.get('candidate_score'):.3f} 仍低于阈值 {best_item.get('threshold'):.3f}。"
+            )
+        else:
+            message = (
+                f"已形成完整关键词 {best_item.get('keyword')}，但 candidate_score "
+                f"{best_item.get('candidate_score'):.3f} 低于阈值 {best_item.get('threshold'):.3f}。"
+            )
+        return {
+            "status": "below_threshold",
+            "keyword": best_item.get("keyword"),
+            "message": message,
+        }
+
+    return {
+        "status": "no_complete_match",
+        "keyword": None,
+        "message": "关键词约束 beam 里也没有形成完整关键词，更像声学/发音或 beam 保留路径的问题。",
+    }
 
 
 def maybe_dump_tensor_artifacts(
@@ -345,13 +506,21 @@ def diagnose_one_wav(wav_path: Path, args, resources: Dict, id2tok: Dict[int, st
     greedy_ids = ctc_greedy_decode(frame_ids, blank_id=0)
     greedy_text, greedy_tokens = ids_to_text(greedy_ids, id2tok)
     beam_hyps = summarize_beam_hyps(probs, id2tok, args.beam_size)
-    keyword_beam_hyps = summarize_keyword_beam_hyps(
+    keyword_beam_all_hyps = decode_keyword_beam_hyps(
         probs,
         resources["keywords"],
         resources["keywords_token"],
         resources["keywords_idxset"],
         id2tok,
-        args.beam_size,
+        resources["threshold_map"],
+    )
+    keyword_beam_hyps = summarize_keyword_beam_hyps(keyword_beam_all_hyps, args.beam_size)
+    keyword_diagnostics = summarize_keyword_diagnostics(
+        keyword_beam_all_hyps,
+        resources["keywords"],
+        resources["keywords_token"],
+        id2tok,
+        resources["threshold_map"],
     )
     frame_topk = summarize_frame_topk(probs, id2tok, args.frame_topk)
     visual_token_ids = build_visual_token_ids(resources["keywords"], resources["keywords_token"])
@@ -377,9 +546,11 @@ def diagnose_one_wav(wav_path: Path, args, resources: Dict, id2tok: Dict[int, st
         },
         "beam_topk": beam_hyps,
         "keyword_beam_topk": keyword_beam_hyps,
+        "keyword_diagnostics": keyword_diagnostics,
         "mean_frame_topk_tokens": frame_topk,
         "token_traces": token_traces,
     }
+    result["decode_assessment"] = summarize_decode_assessment(keyword_diagnostics, final_result)
     artifact_dir = maybe_dump_tensor_artifacts(
         wav_path,
         result,
