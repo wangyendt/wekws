@@ -127,14 +127,38 @@ bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s2_a56_p28_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
 
 # S3: ~74K参数（缩小 input_affine_dim=48, proj_dim=24）
+# 训练 S3 蒸馏模型，并在 stage3 产出常规 test_399 结果。
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s3_a48_p24_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s3_a48_p24_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3
+# 用原项目 evaluate.sh 跑官方离线评测，得到 exp/.../test_399。
 bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --gpu "0,1,2,3" --dict_dir dict_top20
+
+# 用 infer_wav.py 跑全量离线推理评测，结果目录默认是 exp/.../test_infer_399。
 python ./evaluate_infer_wav.py --model s3 --test_data data/test/data.list --gpus 0,1,2,3
+# 同上，只是增加进度打印，适合长时间跑全量集时观察进度。
 python ./evaluate_infer_wav.py --model s3 --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000
+# 查看 infer_wav.py 全量离线推理评测结果，便于和官方 test_399 或流式结果对比。
+python analyze_exp_test_stats.py --exp-dir "exp/fsmn_ctc_distill_s3_a48_p24_l3_merged" --test-id "test_infer_399"
+
+# 用流式 Torch 路径跑全量 test/data.list，前向按 chunk+cache，解码与离线保持一致。
 python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 --streaming --chunk_ms 1000 --result_test_id test_infer_stream_399_fix
+# 查看流式 Torch 全量评测结果，和 test_infer_399 / test_399 做端到端对比。
 python analyze_exp_test_stats.py --exp-dir "exp/fsmn_ctc_distill_s3_a48_p24_l3_merged" --test-id "test_infer_stream_399_fix"
-python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_litert_fp32.tflite --test_data data/test/data.list --gpus -1 --progress_every 2000
+# 单条 wav 的流式 Torch smoke test，确认在线推理输出是否正常。
 python ./infer_wav_stream.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --wav speech_charctc_kws_phone-xiaoyun/example/kws_xiaoyunxiaoyun.wav --disable_threshold
+
+# 导出流式 step TFLite：输入是 1x1x400 特征帧 + cache，输出是 logits + 新 cache。
+python ./torch2lite/export_streaming_litert_tflite.py --config exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/config.yaml --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --dump_meta
+# 对比流式 Torch 和流式 TFLite 的 step 输出误差，确认 logits/cache 数值对齐。
+python ./torch2lite/compare_streaming_torch_tflite.py --config exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/config.yaml --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --tflite exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_litert_fp32.tflite --num_steps 50
+# 用流式 TFLite 路径跑全量 test/data.list，做和流式 Torch 的端到端对比。
+python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_litert_fp32.tflite --test_data data/test/data.list --gpus -1 --progress_every 2000 --streaming --chunk_ms 1000 --result_test_id test_infer_stream_399_tflite
+# 查看流式 TFLite 全量评测结果，直接和 test_infer_stream_399_fix 对比。
+python analyze_exp_test_stats.py --exp-dir "exp/fsmn_ctc_distill_s3_a48_p24_l3_merged" --test-id "test_infer_stream_399_tflite"
+# 单条 wav 的流式 TFLite smoke test，确认在线 TFLite 推理入口正常。
+python ./infer_wav_stream.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_litert_fp32.tflite --wav speech_charctc_kws_phone-xiaoyun/example/kws_xiaoyunxiaoyun.wav --disable_threshold
+
+# 旧的整段静态 TFLite 全量离线评测命令：适合验证整段导出模型，不适合真实在线流式部署对比。
+python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_litert_fp32.tflite --test_data data/test/data.list --gpus -1 --progress_every 2000
 
 # S4: ~63K参数（缩小 input_affine_dim=40, proj_dim=20）
 bash ./run_distill.sh --teacher_checkpoint exp/fsmn_ctc_top20_weight_surgery/79.pt --teacher_config exp/fsmn_ctc_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_s4_a40_p20_l3_merged.yaml --num_keywords 20 --dict_dir dict_top20 --target_exp_dir exp/fsmn_ctc_distill_s4_a40_p20_l3_merged --gpus "0,1,2,3" --seed 666 --align_epochs 300 --finetune_epochs 100 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 3

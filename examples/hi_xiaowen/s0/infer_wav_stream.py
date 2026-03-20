@@ -154,9 +154,6 @@ class StreamingKeywordSpotter:
         interval_frames: int,
         disable_threshold: bool,
     ):
-        if model_type == "tflite":
-            raise ValueError("当前流式推理仅支持 .pt / .zip，暂不支持 .tflite。")
-
         dataset_conf = configs["dataset_conf"]
         fbank_conf = dataset_conf["fbank_conf"]
         self.model = model
@@ -187,6 +184,34 @@ class StreamingKeywordSpotter:
         self.feature_remained = None
         self.feats_ctx_offset = 0
         self.in_cache = torch.zeros(0, 0, 0, dtype=torch.float32, device=device)
+        self.tflite_feat_input_detail = None
+        self.tflite_cache_input_detail = None
+        self.tflite_logits_output_detail = None
+        self.tflite_cache_output_detail = None
+        self.tflite_chunk_frames = None
+        if model_type == "tflite":
+            input_details = model.get_input_details()
+            output_details = model.get_output_details()
+            if len(input_details) != 2 or len(output_details) != 2:
+                raise ValueError(
+                    f"流式 .tflite 期望 2 输入 2 输出（feats/cache -> logits/cache），收到 {len(input_details)} 输入 {len(output_details)} 输出。"
+                )
+            self.tflite_feat_input_detail = next((item for item in input_details if len(item["shape"]) == 3), None)
+            self.tflite_cache_input_detail = next((item for item in input_details if len(item["shape"]) == 4), None)
+            self.tflite_logits_output_detail = next((item for item in output_details if len(item["shape"]) == 3), None)
+            self.tflite_cache_output_detail = next((item for item in output_details if len(item["shape"]) == 4), None)
+            if any(item is None for item in [
+                self.tflite_feat_input_detail,
+                self.tflite_cache_input_detail,
+                self.tflite_logits_output_detail,
+                self.tflite_cache_output_detail,
+            ]):
+                raise ValueError("无法从 .tflite 模型中识别 streaming feats/cache 输入输出。")
+            self.model.allocate_tensors()
+            feat_shape = tuple(int(dim) for dim in self.tflite_feat_input_detail["shape"])
+            cache_shape = tuple(int(dim) for dim in self.tflite_cache_input_detail["shape"])
+            self.tflite_chunk_frames = int(feat_shape[1])
+            self.in_cache = np.zeros(cache_shape, dtype=np.float32)
         self.cur_hyps = [(tuple(), (1.0, 0.0, []))]
         self.total_frames = 0
         self.last_active_pos = -1
@@ -264,6 +289,28 @@ class StreamingKeywordSpotter:
         return feats
 
     def _forward_model(self, feats: torch.Tensor) -> torch.Tensor:
+        if self.model_type == "tflite":
+            if self.tflite_chunk_frames != 1:
+                raise ValueError(
+                    f"当前 streaming .tflite 推理仅支持 chunk_frames=1，收到 {self.tflite_chunk_frames}"
+                )
+            probs_list = []
+            for frame_index in range(feats.size(0)):
+                frame = feats[frame_index:frame_index + 1].unsqueeze(0).cpu().numpy().astype(np.float32)
+                self.model.set_tensor(
+                    self.tflite_feat_input_detail["index"],
+                    frame.astype(self.tflite_feat_input_detail["dtype"]),
+                )
+                self.model.set_tensor(
+                    self.tflite_cache_input_detail["index"],
+                    self.in_cache.astype(self.tflite_cache_input_detail["dtype"]),
+                )
+                self.model.invoke()
+                logits = self.model.get_tensor(self.tflite_logits_output_detail["index"])
+                self.in_cache = self.model.get_tensor(self.tflite_cache_output_detail["index"]).astype(np.float32)
+                probs_list.append(torch.from_numpy(logits).softmax(2)[0])
+            return torch.cat(probs_list, dim=0).cpu()
+
         feats = feats.unsqueeze(0).to(self.device)
         with torch.no_grad():
             if self.model_type == "jit":
