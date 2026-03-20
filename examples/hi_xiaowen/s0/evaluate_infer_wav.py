@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 import infer_wav as iw
+import infer_wav_stream as iws
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from wenet.text.char_tokenizer import CharTokenizer
@@ -38,7 +40,7 @@ class EvalSummaryRow:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="基于 infer_wav.py 的逻辑做全量离线评估，并生成 score.txt / stats.*.txt。"
+        description="基于 infer_wav.py / infer_wav_stream.py 的逻辑做全量评估，并生成 score.txt / stats.*.txt。"
     )
     parser.add_argument("--test_data", default="data/test/data.list", help="待评估 data.list")
     parser.add_argument("--model", default="s3", help="模型别名，例如 s3 / s1 / v2 / top20")
@@ -66,6 +68,8 @@ def parse_args():
     parser.add_argument("--prefetch", type=int, default=100, help="每个 worker 的 dataloader prefetch_factor")
     parser.add_argument("--pin_memory", action="store_true", help="是否启用 dataloader pin_memory")
     parser.add_argument("--progress_every", type=int, default=1000, help="每处理多少条打印一次进度")
+    parser.add_argument("--streaming", action="store_true", help="按流式方式评测，每条 wav 按 chunk 模拟在线输入")
+    parser.add_argument("--chunk_ms", type=float, default=1000.0, help="流式评测时每次送入的音频 chunk 时长，批量评测建议 1000~2000ms")
     parser.add_argument("--indent", type=int, default=2, help="JSON 缩进空格数")
     return parser.parse_args()
 
@@ -123,7 +127,8 @@ def sanitize_test_id(name: str) -> str:
 
 def make_default_result_dir(args, model_info: Dict[str, Optional[Path]]) -> Path:
     checkpoint_name = model_info["checkpoint"].stem
-    test_id = sanitize_test_id(args.result_test_id) if args.result_test_id else f"test_infer_{checkpoint_name}"
+    default_test_id = f"test_infer_stream_{checkpoint_name}" if args.streaming else f"test_infer_{checkpoint_name}"
+    test_id = sanitize_test_id(args.result_test_id) if args.result_test_id else default_test_id
     if args.max_utts > 0:
         test_id = f"{test_id}_max{args.max_utts}"
     return model_info["checkpoint"].parent / test_id
@@ -204,10 +209,24 @@ def build_dataloader(shard_list_path: Path, model_info: Dict[str, Optional[Path]
     return DataLoader(dataset, **dataloader_kwargs)
 
 
-def run_batch_forward(model, feats: torch.Tensor, device: torch.device, is_jit: bool):
+def run_batch_forward(model, feats: torch.Tensor, device: torch.device, model_type: str):
+    if model_type == "tflite":
+        probs_list = []
+        max_frames = 0
+        for item_index in range(feats.size(0)):
+            probs = iw.run_model_forward(model, feats[item_index:item_index + 1], device, model_type)
+            probs_list.append(probs)
+            max_frames = max(max_frames, int(probs.size(0)))
+
+        output_dim = int(probs_list[0].size(1))
+        probs_batch = torch.zeros((len(probs_list), max_frames, output_dim), dtype=torch.float32)
+        for item_index, probs in enumerate(probs_list):
+            probs_batch[item_index, : probs.size(0), :] = probs
+        return probs_batch
+
     feats = feats.to(device)
     with torch.no_grad():
-        if is_jit:
+        if model_type == "jit":
             empty_cache = torch.zeros(0, 0, 0, dtype=torch.float32, device=device)
             logits_raw, _ = model(feats, empty_cache)
         else:
@@ -253,35 +272,56 @@ def worker_eval(
     keywords = iw.parse_keywords_arg(args.keywords)
     model_info = iw.resolve_model_paths(infer_args)
     configs = iw.load_config(model_info["config"])
-    model, device, is_jit = iw.load_model(model_info["checkpoint"], configs, gpu_id)
+    model, device, model_type = iw.load_model(model_info["checkpoint"], configs, gpu_id)
     threshold_map = iw.load_threshold_map(infer_args, model_info, keywords)
     time_resolution_sec = iw.get_time_resolution_sec(configs)
     keywords_token, keywords_idxset = iw.build_keyword_token_info(keywords, model_info["dict_dir"])
-    labels_by_key = load_labels_by_key(shard_list_path)
-    dataloader = build_dataloader(shard_list_path, model_info, configs, args)
-
     score_part = temp_dir / f"score.part{worker_id}.txt"
     jsonl_part = temp_dir / f"results.part{worker_id}.jsonl"
 
     with open(score_part, "w", encoding="utf8") as score_fout, open(jsonl_part, "w", encoding="utf8") as jsonl_fout:
         processed = 0
-        for batch_dict in dataloader:
-            keys = batch_dict["keys"]
-            feats = batch_dict["feats"]
-            lengths = batch_dict["feats_lengths"].to(device)
-            probs_batch = run_batch_forward(model, feats, device, is_jit)
-
-            for item_index, key in enumerate(keys):
-                utt_len = int(lengths[item_index].item())
-                probs_i = probs_batch[item_index][:utt_len]
-                decode_result = iw.decode_keyword_hit_with_token_info(
-                    probs=probs_i,
+        if args.streaming:
+            shard_items = load_eval_items(shard_list_path, 0)
+            lookahead_sec = iws.compute_streaming_lookahead_sec(configs)
+            for meta in shard_items:
+                key = meta["key"]
+                wav_path = iw.to_abs_path(meta["wav"])
+                streamer = iws.StreamingKeywordSpotter(
+                    configs=configs,
+                    model=model,
+                    device=device,
+                    model_type=model_type,
                     keywords=keywords,
                     keywords_token=keywords_token,
                     keywords_idxset=keywords_idxset,
+                    threshold_map=threshold_map,
+                    score_beam_size=3,
+                    path_beam_size=20,
+                    min_frames=5,
+                    max_frames=250,
+                    interval_frames=50,
+                    disable_threshold=False,
                 )
+                waveform = iw.load_wav_and_resample(wav_path, streamer.sample_rate)
+                waveform = waveform.squeeze(0).numpy()
+                pcm = np.clip(np.round(waveform * (1 << 15)), -32768, 32767).astype(np.int16)
+                probs = iws.collect_streaming_probs(streamer, pcm, args.chunk_ms)
+                if probs.size(0) > 0:
+                    decode_result = iw.decode_keyword_hit_with_token_info(
+                        probs=probs,
+                        keywords=keywords,
+                        keywords_token=keywords_token,
+                        keywords_idxset=keywords_idxset,
+                    )
+                else:
+                    decode_result = {
+                        "candidate_keyword": None,
+                        "candidate_score": None,
+                        "start_frame": None,
+                        "end_frame": None,
+                    }
                 score_fout.write(score_line_from_decode(key, decode_result))
-                meta = labels_by_key[key]
                 result = build_result_from_meta(
                     meta=meta,
                     model_info=model_info,
@@ -289,14 +329,54 @@ def worker_eval(
                     decode_result=decode_result,
                     time_resolution_sec=time_resolution_sec,
                 )
+                result["mode"] = "streaming"
+                result["decode_mode"] = "offline_ctc_prefix_beam"
+                result["chunk_ms"] = args.chunk_ms
+                result["streaming_lookahead_sec"] = lookahead_sec
+                result["model_type"] = model_type
                 jsonl_fout.write(json.dumps(result, ensure_ascii=False) + "\n")
                 processed += 1
 
                 if args.progress_every > 0 and processed % args.progress_every == 0:
                     print(
-                        f"[worker {worker_id}] processed {processed}/{num_items} on gpu={gpu_id}",
+                        f"[worker {worker_id}] processed {processed}/{num_items} on gpu={gpu_id} streaming=1",
                         flush=True,
                     )
+        else:
+            labels_by_key = load_labels_by_key(shard_list_path)
+            dataloader = build_dataloader(shard_list_path, model_info, configs, args)
+            for batch_dict in dataloader:
+                keys = batch_dict["keys"]
+                feats = batch_dict["feats"]
+                lengths = batch_dict["feats_lengths"]
+                probs_batch = run_batch_forward(model, feats, device, model_type)
+
+                for item_index, key in enumerate(keys):
+                    utt_len = int(lengths[item_index].item())
+                    probs_i = probs_batch[item_index][:utt_len]
+                    decode_result = iw.decode_keyword_hit_with_token_info(
+                        probs=probs_i,
+                        keywords=keywords,
+                        keywords_token=keywords_token,
+                        keywords_idxset=keywords_idxset,
+                    )
+                    score_fout.write(score_line_from_decode(key, decode_result))
+                    meta = labels_by_key[key]
+                    result = build_result_from_meta(
+                        meta=meta,
+                        model_info=model_info,
+                        threshold_map=threshold_map,
+                        decode_result=decode_result,
+                        time_resolution_sec=time_resolution_sec,
+                    )
+                    jsonl_fout.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    processed += 1
+
+                    if args.progress_every > 0 and processed % args.progress_every == 0:
+                        print(
+                            f"[worker {worker_id}] processed {processed}/{num_items} on gpu={gpu_id}",
+                            flush=True,
+                        )
 
     return {
         "worker_id": worker_id,
