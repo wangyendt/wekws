@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
+import numpy as np
 import pandas as pd
 import seaborn as sns
 import streamlit as st
@@ -30,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import infer_wav as iw  # noqa: E402
 import diagnose_wav as dw  # noqa: E402
+import trace_wav_pipeline as tw  # noqa: E402
 
 
 st.set_page_config(
@@ -49,6 +51,7 @@ DEFAULT_MODEL_ALIAS = "s3"
 DEFAULT_DIAGNOSE_BEAM_SIZE = 5
 DEFAULT_DIAGNOSE_FRAME_TOPK = 5
 DIAGNOSIS_CACHE_VERSION = "v3_keyword_diagnostics"
+PIPELINE_CACHE_VERSION = "v1_full_pipeline_visualizer"
 MODEL_SUMMARY = {
     "top20": {
         "title": "Top20 权重手术老师模型",
@@ -251,6 +254,55 @@ def inject_css() -> None:
         div[data-testid="stAudioInput"] label {
             font-weight: 700;
             color: #0f172a;
+        }
+        .flow-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.7rem;
+            align-items: stretch;
+            margin: 0.4rem 0 0.9rem 0;
+        }
+        .flow-card {
+            min-width: 180px;
+            flex: 1 1 220px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.97), rgba(241,245,249,0.96));
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 18px;
+            padding: 0.85rem 0.95rem;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
+        }
+        .flow-card-title {
+            font-size: 0.95rem;
+            font-weight: 800;
+            color: #0f172a;
+            margin-bottom: 0.2rem;
+        }
+        .flow-card-shape {
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 0.82rem;
+            color: #0f172a;
+            background: rgba(226, 232, 240, 0.72);
+            border-radius: 999px;
+            padding: 0.18rem 0.55rem;
+            display: inline-block;
+            margin-bottom: 0.45rem;
+        }
+        .flow-card-note {
+            color: #475569;
+            font-size: 0.84rem;
+            line-height: 1.45;
+        }
+        .flow-card-stats {
+            color: #334155;
+            font-size: 0.78rem;
+            line-height: 1.5;
+            margin-top: 0.45rem;
+        }
+        .flow-arrow {
+            align-self: center;
+            font-size: 1.25rem;
+            color: #94a3b8;
+            font-weight: 800;
         }
         </style>
         """,
@@ -502,6 +554,34 @@ def compute_record_diagnosis_uncached(
     )
     args = SimpleNamespace(beam_size=beam_size, frame_topk=frame_topk)
     return dw.diagnose_one_wav(Path(wav_path), args, resources, resources["id2tok"])
+
+
+@st.cache_data(show_spinner=False)
+def compute_record_pipeline(
+    wav_path: str,
+    model_alias: str,
+    checkpoint: str,
+    config: str,
+    dict_dir: str,
+    stats_dir: str,
+    gpu: int,
+    beam_size: int,
+    cache_version: str,
+) -> Dict:
+    resources = load_explicit_infer_resources(
+        model_alias=model_alias,
+        checkpoint=checkpoint,
+        config=config,
+        dict_dir=dict_dir,
+        stats_dir=stats_dir,
+        gpu=gpu,
+    )
+    return tw.inspect_one_wav_pipeline(
+        wav_path=Path(wav_path),
+        resources=resources,
+        id2tok=resources["id2tok"],
+        beam_size=beam_size,
+    )
 
 
 def create_record_from_audio(
@@ -1007,6 +1087,451 @@ def render_beam_timeline_plot(diagnosis: Dict) -> None:
     plt.close(fig)
 
 
+def format_shape(shape: List[int]) -> str:
+    if not shape:
+        return "-"
+    return " x ".join(str(item) for item in shape)
+
+
+def render_flow_stage_cards(pipeline: Dict) -> None:
+    stages = pipeline.get("flow_stages", [])
+    if not stages:
+        st.info("没有可展示的全链路阶段信息。")
+        return
+
+    fragments = []
+    for index, stage in enumerate(stages):
+        stats = stage.get("stats", {})
+        fragments.append(
+            f"""
+            <div class="flow-card">
+                <div class="flow-card-title">{stage.get('title', '')}</div>
+                <div class="flow-card-shape">{format_shape(stage.get('shape', []))}</div>
+                <div class="flow-card-note">{stage.get('note', '')}</div>
+                <div class="flow-card-stats">
+                    mean={stats.get('mean', 0.0):.3f} | std={stats.get('std', 0.0):.3f}<br/>
+                    min={stats.get('min', 0.0):.3f} | max={stats.get('max', 0.0):.3f}
+                </div>
+            </div>
+            """
+        )
+        if index != len(stages) - 1:
+            fragments.append('<div class="flow-arrow">→</div>')
+
+    st.markdown(f"<div class='flow-grid'>{''.join(fragments)}</div>", unsafe_allow_html=True)
+
+
+def payload_to_heatmap_matrix(payload: Dict) -> Optional[np.ndarray]:
+    matrix = payload.get("matrix", [])
+    if not matrix:
+        return None
+    array = np.array(matrix, dtype=float)
+    if array.ndim != 2:
+        return None
+    return array.T
+
+
+def render_matrix_heatmap_plot(payload: Dict, cmap: str = "magma") -> None:
+    data = payload_to_heatmap_matrix(payload)
+    if data is None:
+        st.info("当前阶段没有二维矩阵可视化。")
+        return
+
+    fig, ax = plt.subplots(figsize=(8.4, max(3.2, min(6.5, data.shape[0] * 0.03 + 2.2))))
+    image = ax.imshow(data, aspect="auto", interpolation="nearest", cmap=cmap, origin="lower")
+    ax.set_title(payload.get("title", ""))
+    ax.set_ylabel(payload.get("y_axis_name", "dim"))
+    ax.set_xlabel("时间 / 帧")
+
+    time_axis = payload.get("time_axis_sec", [])
+    if time_axis:
+        tick_count = min(10, len(time_axis))
+        if tick_count > 1:
+            tick_positions = [round(index * (len(time_axis) - 1) / (tick_count - 1)) for index in range(tick_count)]
+            ax.set_xticks(tick_positions)
+            ax.set_xticklabels([f"{time_axis[pos]:.2f}" for pos in tick_positions])
+
+    fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def render_matrix_surface_plot(payload: Dict, cmap: str = "viridis") -> None:
+    data = payload_to_heatmap_matrix(payload)
+    if data is None:
+        st.info("当前阶段没有 3D 曲面可视化。")
+        return
+
+    y_step = max(1, data.shape[0] // 48)
+    x_step = max(1, data.shape[1] // 72)
+    data_sub = data[::y_step, ::x_step]
+    x_coords = np.arange(data_sub.shape[1])
+    y_coords = np.arange(data_sub.shape[0])
+    grid_x, grid_y = np.meshgrid(x_coords, y_coords)
+
+    fig = plt.figure(figsize=(8.4, 4.6))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.plot_surface(grid_x, grid_y, data_sub, cmap=cmap, linewidth=0, antialiased=True, alpha=0.96)
+    ax.set_title(f"{payload.get('title', '')} 3D 曲面")
+    ax.set_xlabel("时间索引")
+    ax.set_ylabel(payload.get("y_axis_name", "dim"))
+    ax.set_zlabel("值")
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def render_matrix_hist_plot(payload: Dict, color: str = "#2563eb") -> None:
+    matrix = payload.get("matrix", [])
+    if not matrix:
+        st.info("当前阶段没有分布直方图。")
+        return
+    values = np.array(matrix, dtype=float).reshape(-1)
+    if values.size == 0:
+        st.info("当前阶段没有分布直方图。")
+        return
+
+    fig, ax = plt.subplots(figsize=(7.8, 3.2))
+    ax.hist(values, bins=48, color=color, alpha=0.85, edgecolor="white", linewidth=0.4)
+    ax.set_title(f"{payload.get('title', '')} 数值分布")
+    ax.set_xlabel("值")
+    ax.set_ylabel("计数")
+    ax.grid(alpha=0.18)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def render_stage_visual_triptych(payload: Dict, cmap: str = "magma") -> None:
+    col1, col2 = st.columns([1.2, 1.0], gap="large")
+    with col1:
+        render_matrix_heatmap_plot(payload, cmap=cmap)
+    with col2:
+        render_matrix_surface_plot(payload, cmap="viridis")
+    render_matrix_hist_plot(payload)
+
+    stats = payload.get("stats", {})
+    if stats:
+        stats_df = pd.DataFrame(
+            [
+                {"字段": "shape", "值": format_shape(stats.get("shape", []))},
+                {"字段": "min", "值": stats.get("min")},
+                {"字段": "p01", "值": stats.get("p01")},
+                {"字段": "mean", "值": stats.get("mean")},
+                {"字段": "p50", "值": stats.get("p50")},
+                {"字段": "p99", "值": stats.get("p99")},
+                {"字段": "max", "值": stats.get("max")},
+                {"字段": "std", "值": stats.get("std")},
+                {"字段": "nonzero_ratio", "值": stats.get("nonzero_ratio")},
+            ]
+        )
+        st.dataframe(stats_df, use_container_width=True, hide_index=True)
+    if payload.get("note"):
+        st.caption(payload["note"])
+
+
+def render_frame_energy_plot(pipeline: Dict) -> None:
+    frame_energy = pipeline.get("frame_energy", {})
+    values = frame_energy.get("values", [])
+    times_sec = frame_energy.get("times_sec", [])
+    if not values or not times_sec:
+        st.info("没有可展示的逐帧能量。")
+        return
+
+    fig, ax = plt.subplots(figsize=(8.4, 3.1))
+    ax.plot(times_sec, values, color="#0f766e", linewidth=1.6)
+    ax.fill_between(times_sec, values, color="#2dd4bf", alpha=0.18)
+    ax.set_title("逐帧 Fbank 平均能量")
+    ax.set_xlabel("时间 (s)")
+    ax.set_ylabel("平均能量")
+    ax.grid(alpha=0.18)
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
+def render_context_skip_panel(record: Dict, pipeline: Dict) -> None:
+    context_debug = pipeline.get("context_debug", {})
+    frame_skip_debug = pipeline.get("frame_skip_debug", {})
+    cmvn_debug = pipeline.get("cmvn_debug", {})
+    windows = context_debug.get("windows", [])
+
+    summary_rows = [
+        {"字段": "Context 开关", "值": context_debug.get("enabled")},
+        {"字段": "left/right", "值": f"{context_debug.get('left', 0)} / {context_debug.get('right', 0)}"},
+        {"字段": "Context 输入 shape", "值": format_shape(context_debug.get("input_shape", []))},
+        {"字段": "Context 输出 shape", "值": format_shape(context_debug.get("output_shape", []))},
+        {"字段": "frame_skip", "值": frame_skip_debug.get("frame_skip")},
+        {"字段": "Skip 输入 shape", "值": format_shape(frame_skip_debug.get("input_shape", []))},
+        {"字段": "Skip 输出 shape", "值": format_shape(frame_skip_debug.get("output_shape", []))},
+        {"字段": "CMVN 开关", "值": cmvn_debug.get("enabled")},
+    ]
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    if windows:
+        default_frame = min(len(windows) - 1, max(0, len(windows) // 2))
+        selected_frame = st.slider(
+            "选择一个 context 输出帧",
+            min_value=0,
+            max_value=len(windows) - 1,
+            value=default_frame,
+            key=f"context_window_{record['id']}",
+        )
+        selected_window = windows[selected_frame]
+        source_df = pd.DataFrame(
+            [
+                {"拼接槽位": slot_index, "来源原始 Fbank 帧": frame_index}
+                for slot_index, frame_index in enumerate(selected_window)
+            ]
+        )
+        col1, col2 = st.columns([0.95, 1.05], gap="large")
+        with col1:
+            st.markdown("###### Context 窗口来源")
+            st.dataframe(source_df, use_container_width=True, hide_index=True)
+        with col2:
+            fig, ax = plt.subplots(figsize=(6.8, 2.8))
+            ax.step(range(len(selected_window)), selected_window, where="mid", color="#7c3aed", linewidth=2.0)
+            ax.scatter(range(len(selected_window)), selected_window, color="#a855f7", s=42)
+            ax.set_title(f"输出帧 {selected_frame} 的拼接来源")
+            ax.set_xlabel("槽位")
+            ax.set_ylabel("原始帧索引")
+            ax.grid(alpha=0.18)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
+    kept = frame_skip_debug.get("kept_input_indices", [])
+    dropped = frame_skip_debug.get("dropped_input_indices", [])
+    if kept:
+        fig, ax = plt.subplots(figsize=(8.2, 2.8))
+        ax.scatter(kept, [1] * len(kept), color="#10b981", s=36, label="保留帧")
+        if dropped:
+            ax.scatter(dropped, [0] * len(dropped), color="#ef4444", s=18, alpha=0.7, label="丢弃帧")
+        ax.set_title("Frame Skip 取帧示意")
+        ax.set_xlabel("Context 输出帧索引")
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(["drop", "keep"])
+        ax.grid(alpha=0.18, axis="x")
+        ax.legend(loc="upper right")
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    if cmvn_debug.get("enabled"):
+        st.caption(
+            "CMVN 预览：前 16 维全局均值与逆标准差已加载，可直接用来解释归一化前后分布差异。"
+        )
+        cmvn_df = pd.DataFrame(
+            {
+                "dim": list(range(len(cmvn_debug.get("mean_preview", [])))),
+                "mean": cmvn_debug.get("mean_preview", []),
+                "istd": cmvn_debug.get("istd_preview", []),
+            }
+        )
+        st.dataframe(cmvn_df, use_container_width=True, hide_index=True)
+
+
+def render_keyword_strength_panel(pipeline: Dict) -> None:
+    token_strength = pipeline.get("token_strength", [])
+    if not token_strength:
+        st.info("没有可展示的关键词 token 强弱分析。")
+        return
+
+    for keyword_item in token_strength:
+        keyword = keyword_item.get("keyword", "")
+        token_rows = keyword_item.get("token_rows", [])
+        if not token_rows:
+            continue
+
+        st.markdown(f"###### {keyword}")
+        summary = [
+            {"字段": "状态", "值": keyword_item.get("status")},
+            {"字段": "candidate_score", "值": keyword_item.get("candidate_score")},
+            {"字段": "threshold", "值": keyword_item.get("threshold")},
+        ]
+        st.dataframe(pd.DataFrame(summary), use_container_width=True, hide_index=True)
+
+        df = pd.DataFrame(token_rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        weakest = None
+        if "matched_prob" in df.columns and df["matched_prob"].notna().any():
+            weakest = df[df["matched_prob"].notna()].sort_values("matched_prob").iloc[0]
+        elif "peak_prob" in df.columns and not df.empty:
+            weakest = df.sort_values("peak_prob").iloc[0]
+        if weakest is not None:
+            st.caption(
+                f"当前最弱 token: `{weakest['token']}`，peak_prob={weakest.get('peak_prob', float('nan')):.3f}，"
+                f"matched_prob={weakest.get('matched_prob') if pd.notna(weakest.get('matched_prob')) else 'N/A'}。"
+            )
+
+        fig, ax1 = plt.subplots(figsize=(8.4, 3.2))
+        x = np.arange(len(df))
+        width = 0.35
+        peak_prob = df["peak_prob"].fillna(0.0).to_numpy()
+        matched_prob = df["matched_prob"].fillna(0.0).to_numpy() if "matched_prob" in df else np.zeros(len(df))
+        ax1.bar(x - width / 2, peak_prob, width=width, color="#2563eb", label="peak_prob")
+        ax1.bar(x + width / 2, matched_prob, width=width, color="#f59e0b", label="matched_prob")
+        ax1.set_ylabel("token 概率")
+        ax1.set_ylim(0.0, max(1.0, float(max(peak_prob.max(), matched_prob.max(), 1.0))))
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(df["token"].tolist())
+        ax1.grid(alpha=0.18, axis="y")
+        ax1.legend(loc="upper left")
+
+        ax2 = ax1.twinx()
+        local_energy = df["local_energy"].fillna(df["frame_energy"]).fillna(0.0).to_numpy()
+        ax2.plot(x, local_energy, color="#047857", marker="o", linewidth=2.0, label="局部能量")
+        ax2.set_ylabel("能量")
+        ax1.set_title(f"{keyword} token 强弱对比")
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+
+def render_beam_trace_panel(record: Dict, pipeline: Dict) -> None:
+    beam_trace = pipeline.get("beam_trace", {})
+    trace_mode = st.radio(
+        "Beam 视角",
+        ["关键词约束", "普通"],
+        horizontal=True,
+        key=f"beam_trace_mode_{record['id']}",
+    )
+    trace_key = "keyword" if trace_mode == "关键词约束" else "plain"
+    trace = beam_trace.get(trace_key, {})
+    frames = trace.get("frames", [])
+    if not frames:
+        st.info("没有可展示的 beam 轨迹。")
+        return
+
+    rank_count = min(5, max((len(frame.get("beam_after", [])) for frame in frames), default=0))
+    if rank_count > 0:
+        fig, ax = plt.subplots(figsize=(8.4, 3.4))
+        frame_times = [frame.get("time_sec", 0.0) for frame in frames]
+        for rank in range(rank_count):
+            values = []
+            for frame in frames:
+                beam_after = frame.get("beam_after", [])
+                values.append(beam_after[rank].get("score") if rank < len(beam_after) else np.nan)
+            ax.plot(frame_times, values, linewidth=1.45, label=f"rank {rank + 1}")
+        ax.set_title(f"{trace_mode} Beam 每帧 Top 路径分数")
+        ax.set_xlabel("时间 (s)")
+        ax.set_ylabel("score")
+        ax.grid(alpha=0.18)
+        ax.legend(loc="upper right", ncol=2, fontsize=8)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+    selected_frame = st.slider(
+        "逐帧查看 Beam 展开过程",
+        min_value=0,
+        max_value=len(frames) - 1,
+        value=min(len(frames) - 1, max(0, len(frames) // 2)),
+        key=f"beam_trace_frame_{record['id']}_{trace_key}",
+    )
+    frame_item = frames[selected_frame]
+    st.caption(
+        f"第 {selected_frame} 帧，time={frame_item.get('time_sec', 0.0):.3f}s。"
+        "上表是这一帧参与扩展的 top token，下表是二次 prune 后保留下来的 beam。"
+    )
+
+    top_tokens = frame_item.get("top_tokens", [])
+    beam_after = frame_item.get("beam_after", [])
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("###### 当前帧 Top Token")
+        if top_tokens:
+            st.dataframe(pd.DataFrame(top_tokens), use_container_width=True, hide_index=True)
+        else:
+            st.info("这一帧没有通过阈值过滤的 token。")
+    with right:
+        st.markdown("###### 当前帧保留的 Beam")
+        if beam_after:
+            st.dataframe(pd.DataFrame(beam_after), use_container_width=True, hide_index=True)
+        else:
+            st.info("这一帧没有保留下来的路径。")
+
+    final_hyps = trace.get("final_hyps", [])
+    st.markdown("###### 最终 Beam 结果")
+    if final_hyps:
+        st.dataframe(pd.DataFrame(final_hyps), use_container_width=True, hide_index=True)
+    else:
+        st.info("没有最终 Beam 结果。")
+
+
+def render_pipeline_visualization_section(record: Dict, gpu: int) -> None:
+    infer_result = record.get("infer_result", {})
+    wav_path = str(get_record_path(record))
+    model_alias = record.get("model_alias", "")
+    checkpoint = record.get("checkpoint", "")
+    config = infer_result.get("config", "")
+    dict_dir = infer_result.get("dict_dir", "")
+    stats_dir = infer_result.get("stats_dir") or ""
+
+    with st.spinner("正在提取 wav -> 特征 -> FSMN -> beam 的全链路中间态..."):
+        pipeline = compute_record_pipeline(
+            wav_path=wav_path,
+            model_alias=model_alias,
+            checkpoint=checkpoint,
+            config=config,
+            dict_dir=dict_dir,
+            stats_dir=stats_dir,
+            gpu=gpu,
+            beam_size=DEFAULT_DIAGNOSE_BEAM_SIZE,
+            cache_version=PIPELINE_CACHE_VERSION,
+        )
+
+    st.markdown("##### 全链路数据流")
+    render_flow_stage_cards(pipeline)
+
+    top_tabs = st.tabs(["输入与频谱", "前处理细节", "模型层", "关键词强弱", "Beam 逐帧"])
+
+    with top_tabs[0]:
+        raw_waveform = pipeline.get("audio", {}).get("resampled_waveform", {})
+        if raw_waveform.get("times") and raw_waveform.get("amplitude"):
+            fig, ax = plt.subplots(figsize=(8.4, 3.0))
+            ax.plot(raw_waveform["times"], raw_waveform["amplitude"], color="#2563eb", linewidth=0.75)
+            ax.set_title("重采样后波形")
+            ax.set_xlabel("时间 (s)")
+            ax.set_ylabel("振幅")
+            ax.grid(alpha=0.18)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+        render_frame_energy_plot(pipeline)
+        spectral_tabs = st.tabs(["STFT", "Mel", "log-Mel", "实际 Fbank"])
+        spectral_payloads = [
+            pipeline.get("spectra", {}).get("stft_db", {}),
+            pipeline.get("spectra", {}).get("mel_energy", {}),
+            pipeline.get("spectra", {}).get("log_mel", {}),
+            pipeline.get("spectra", {}).get("fbank", {}),
+        ]
+        for tab, payload in zip(spectral_tabs, spectral_payloads):
+            with tab:
+                render_stage_visual_triptych(payload)
+
+    with top_tabs[1]:
+        render_context_skip_panel(record, pipeline)
+        fbank_payload = pipeline.get("spectra", {}).get("fbank", {})
+        if fbank_payload:
+            st.markdown("###### 实际 Fbank 可视化")
+            render_stage_visual_triptych(fbank_payload)
+
+    with top_tabs[2]:
+        model_layers = pipeline.get("model_layers", [])
+        if not model_layers:
+            st.info("当前模型格式不支持逐层展开。")
+        else:
+            layer_titles = [f"{item['title']} [{format_shape(item.get('shape', []))}]" for item in model_layers]
+            selected_title = st.selectbox(
+                "选择一个模型内部阶段",
+                options=layer_titles,
+                index=min(len(layer_titles) - 1, 0),
+                key=f"model_layer_select_{record['id']}",
+            )
+            selected_index = layer_titles.index(selected_title)
+            render_stage_visual_triptych(model_layers[selected_index], cmap="viridis")
+
+    with top_tabs[3]:
+        render_keyword_strength_panel(pipeline)
+
+    with top_tabs[4]:
+        render_beam_trace_panel(record, pipeline)
+
+
 def render_diagnosis_section(record: Dict, gpu: int) -> None:
     infer_result = record.get("infer_result", {})
     wav_path = str(get_record_path(record))
@@ -1288,7 +1813,11 @@ def render_selected_record(record: Optional[Dict], records: List[Dict], gpu: int
         ]
     )
     st.dataframe(detail_df, use_container_width=True, hide_index=True)
-    render_diagnosis_section(record, gpu)
+    diag_tab, pipeline_tab = st.tabs(["诊断视图", "全链路工作台"])
+    with diag_tab:
+        render_diagnosis_section(record, gpu)
+    with pipeline_tab:
+        render_pipeline_visualization_section(record, gpu)
 
 
 def render_recorder(resources: Dict, records: List[Dict]) -> None:

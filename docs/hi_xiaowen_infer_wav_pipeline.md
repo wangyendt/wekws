@@ -2,6 +2,15 @@
 
 本文面向 `examples/hi_xiaowen/s0/infer_wav.py`，按真实代码调用顺序说明一条 `wav` 是如何一步一步变成最终 JSON 结果的。
 
+补充说明：当前 `examples/hi_xiaowen/s0/record_label_webui/app.py` 已新增“全链路工作台”页签，除了本文的文字拆解外，还可以直接对单条录音查看：
+
+- `wav -> STFT -> mel -> log-mel -> 实际 Kaldi fbank`
+- `context expansion / frame_skip / CMVN`
+- `FSMN 输入层、每个 block 的 proj / memory / affine / relu`
+- `logits / softmax / 关键词 token 强弱 / beam search 逐帧展开`
+
+也就是说，本文负责解释代码和公式，WebUI 负责把同一条录音的中间张量、shape、分布和数据流箭头直接画出来。
+
 重点覆盖：
 
 - 函数调用链
