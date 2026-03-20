@@ -12,7 +12,13 @@
 #include <stdint.h>
 #include <math.h>
 
+#if __has_include("tensorflow/lite/micro/micro_log.h")
 #include "tensorflow/lite/micro/micro_log.h"
+#else
+#ifndef MicroPrintf
+#define MicroPrintf(...) ((void)0)
+#endif
+#endif
 
 #ifdef USE_CMSIS_DSP
 #include "arm_math.h"
@@ -23,10 +29,10 @@ extern "C" {
 #endif
 
 // Configuration constants
-#define FBANK_MAX_MEL_BINS 23
-#define FBANK_MAX_FFT_SIZE 1024  // Support longer frames (40ms @ 16kHz = 640 samples)
+#define FBANK_MAX_MEL_BINS 128
+#define FBANK_MAX_FFT_SIZE 1024  // 25ms @ 16kHz -> 400, rounded to 512; keep headroom
 #define FBANK_MAX_FRAME_SIZE 1024  // Support up to 64ms @ 16kHz
-#define FBANK_MAX_FILTER_WIDTH 120  // Maximum number of non-zero weights per Mel bin (increased for 1024 FFT)
+#define FBANK_MAX_FILTER_WIDTH 256
 
 #ifdef FBANK_USE_PRECOMPUTED_TABLES
 #define FBANK_MAX_WORK_BUFFER_FLOATS (FBANK_MAX_FRAME_SIZE + FBANK_MAX_FFT_SIZE * 2 + FBANK_MAX_FFT_SIZE / 2 + 1)
@@ -43,6 +49,10 @@ extern "C" {
 // FBANK_USE_FAST_LOG_APPROX:
 //   0 = use logf (default, better numerical parity)
 //   1 = use lightweight log approximation (smaller libm dependency footprint)
+//
+// FBANK_USE_PRECOMPUTED_TABLES 当前先默认不打开。
+// 这份 pybind 桌面封装需要支持动态 num_mel_bins/frame_length，
+// 固定表只适合 MCU 固定配置部署。
 
 /**
  * @brief Sparse Mel filter bank representation
@@ -67,6 +77,9 @@ typedef struct {
     int32_t use_energy;        // Whether to use energy (0 or 1)
     float low_freq;            // Low frequency cutoff (Hz, default 20)
     float high_freq;           // High frequency cutoff (Hz, 0=Nyquist)
+    int32_t remove_dc_offset;  // Match Kaldi default: 1
+    int32_t round_to_power_of_two;  // Match Kaldi default: 1
+    int32_t snip_edges;        // Match Kaldi default: 1
 } FbankConfig;
 
 /**

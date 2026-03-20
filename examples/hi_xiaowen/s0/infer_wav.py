@@ -15,6 +15,7 @@ import torchaudio.compliance.kaldi as kaldi
 import yaml
 from wenet.text.char_tokenizer import CharTokenizer
 
+from torch2lite import fbank_pybind
 from wekws.model.kws_model import init_model
 from wekws.model.loss import ctc_prefix_beam_search
 from wekws.utils.checkpoint import load_checkpoint
@@ -409,7 +410,7 @@ def extract_fbank_features(waveform: torch.Tensor, dataset_conf: Dict) -> torch.
     fbank_conf = dataset_conf.get("fbank_conf", {})
     sample_rate = int(dataset_conf.get("resample_conf", {}).get("resample_rate", 16000))
     waveform = waveform * (1 << 15)
-    feats = kaldi.fbank(
+    feats = fbank_pybind.fbank(
         waveform,
         num_mel_bins=int(fbank_conf.get("num_mel_bins", 80)),
         frame_length=float(fbank_conf.get("frame_length", 25)),
@@ -418,6 +419,15 @@ def extract_fbank_features(waveform: torch.Tensor, dataset_conf: Dict) -> torch.
         energy_floor=0.0,
         sample_frequency=sample_rate,
     )
+    # feats = kaldi.fbank(
+    #     waveform,
+    #     num_mel_bins=int(fbank_conf.get("num_mel_bins", 80)),
+    #     frame_length=float(fbank_conf.get("frame_length", 25)),
+    #     frame_shift=float(fbank_conf.get("frame_shift", 10)),
+    #     dither=0.0,
+    #     energy_floor=0.0,
+    #     sample_frequency=sample_rate,
+    # )
     return feats
 
 

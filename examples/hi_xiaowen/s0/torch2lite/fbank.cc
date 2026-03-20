@@ -27,6 +27,24 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #endif
 
+static int32_t next_power_of_2(int32_t value) {
+    int32_t power = 1;
+    while (power < value) {
+        power <<= 1;
+    }
+    return power;
+}
+
+static int32_t resolve_fft_size(const FbankConfig *config, int32_t frame_length) {
+    if (config->fft_size > 0) {
+        return config->fft_size;
+    }
+    if (config->round_to_power_of_two) {
+        return next_power_of_2(frame_length);
+    }
+    return frame_length;
+}
+
 // Mel scale conversion (HTK formula, same as Kaldi)
 float hz_to_mel(float hz) {
     return 1127.0f * logf(1.0f + hz / 700.0f);
@@ -45,75 +63,81 @@ static void init_povey_window(float *window, int32_t window_size) {
     }
 }
 
-// Initialize mel filter banks (sparse storage for memory efficiency)
+// Initialize mel filter banks to match torchaudio.compliance.kaldi.get_mel_banks.
 static int32_t init_mel_banks(FbankExtractor *extractor) {
     const FbankConfig *cfg = &extractor->config;
-    int32_t num_bins = cfg->fft_size / 2 + 1;
+    int32_t num_fft_bins = cfg->fft_size / 2;
     float nyquist = cfg->sample_rate / 2.0f;
-    
+
     float low_freq = cfg->low_freq;
     float high_freq = cfg->high_freq;
-    if (high_freq <= 0.0f || high_freq > nyquist) {
+    if (high_freq <= 0.0f) {
+        high_freq += nyquist;
+    }
+    if (high_freq > nyquist) {
         high_freq = nyquist;
     }
-    
-    // Convert to mel scale
+
+    if (!(0.0f <= low_freq && low_freq < nyquist && 0.0f < high_freq && high_freq <= nyquist && low_freq < high_freq)) {
+        return -1;
+    }
+
     float mel_low = hz_to_mel(low_freq);
     float mel_high = hz_to_mel(high_freq);
     float mel_step = (mel_high - mel_low) / (cfg->num_mel_bins + 1);
-    
-    // Create mel bin centers
-    float mel_centers[FBANK_MAX_MEL_BINS + 2];
-    for (int32_t i = 0; i <= cfg->num_mel_bins + 1; i++) {
-        mel_centers[i] = mel_low + i * mel_step;
-    }
-    
-    // Build sparse triangular filters
+    float fft_bin_width = (float)cfg->sample_rate / (float)cfg->fft_size;
+
     for (int32_t i = 0; i < cfg->num_mel_bins; i++) {
-        float left_mel = mel_centers[i];
-        float center_mel = mel_centers[i + 1];
-        float right_mel = mel_centers[i + 2];
-        
-        float left_hz = mel_to_hz(left_mel);
-        float center_hz = mel_to_hz(center_mel);
-        float right_hz = mel_to_hz(right_mel);
-        
-        // Convert Hz to FFT bin indices
-        int32_t left_bin = (int32_t)(left_hz * num_bins / nyquist);
-        int32_t right_bin = (int32_t)(right_hz * num_bins / nyquist) + 1;
-        
-        // Clamp to valid range
-        if (left_bin < 0) left_bin = 0;
-        if (right_bin > num_bins) right_bin = num_bins;
-        
-        extractor->mel_filters[i].start_bin = left_bin;
-        extractor->mel_filters[i].end_bin = right_bin;
-        
-        // Calculate and store only non-zero weights
-        int32_t filter_width = right_bin - left_bin;
-        if (filter_width > FBANK_MAX_FILTER_WIDTH) {
-            // Debug output for troubleshooting
-            (void)i;
-            (void)filter_width;
-            return -1;  // Filter too wide
-        }
-        
-        for (int32_t j = 0; j < filter_width; j++) {
-            int32_t fft_bin = left_bin + j;
-            float freq = fft_bin * nyquist / (num_bins - 1);
-            
-            float weight = 0.0f;
-            if (freq >= left_hz && freq <= right_hz) {
-                if (freq <= center_hz) {
-                    weight = (freq - left_hz) / (center_hz - left_hz);
-                } else {
-                    weight = (right_hz - freq) / (right_hz - center_hz);
-                }
+        float left_mel = mel_low + i * mel_step;
+        float center_mel = mel_low + (i + 1) * mel_step;
+        float right_mel = mel_low + (i + 2) * mel_step;
+
+        int32_t start_bin = -1;
+        int32_t end_bin = -1;
+        float dense_weights[FBANK_MAX_FILTER_WIDTH];
+        int32_t dense_count = 0;
+
+        for (int32_t fft_bin = 0; fft_bin < num_fft_bins; ++fft_bin) {
+            float freq = fft_bin_width * fft_bin;
+            float mel = hz_to_mel(freq);
+            float up_slope = (mel - left_mel) / (center_mel - left_mel);
+            float down_slope = (right_mel - mel) / (right_mel - center_mel);
+            float weight = MIN(up_slope, down_slope);
+            if (weight < 0.0f) {
+                weight = 0.0f;
             }
-            extractor->mel_filters[i].weights[j] = weight;
+            if (weight <= 0.0f) {
+                continue;
+            }
+            if (start_bin < 0) {
+                start_bin = fft_bin;
+            }
+            end_bin = fft_bin + 1;
+            if (dense_count >= FBANK_MAX_FILTER_WIDTH) {
+                return -1;
+            }
+            dense_weights[dense_count++] = weight;
+        }
+
+        if (start_bin < 0 || end_bin < 0) {
+            return -1;
+        }
+
+        extractor->mel_filters[i].start_bin = start_bin;
+        extractor->mel_filters[i].end_bin = end_bin;
+        int32_t filter_width = end_bin - start_bin;
+        if (filter_width > FBANK_MAX_FILTER_WIDTH) {
+            return -1;
+        }
+
+        for (int32_t j = 0; j < filter_width; ++j) {
+            extractor->mel_filters[i].weights[j] = dense_weights[j];
+        }
+        for (int32_t j = filter_width; j < FBANK_MAX_FILTER_WIDTH; ++j) {
+            extractor->mel_filters[i].weights[j] = 0.0f;
         }
     }
-    
+
     return 0;
 }
 #endif
@@ -144,53 +168,57 @@ void fbank_init_default(FbankExtractor *extractor) {
         .sample_rate = 16000,
         .frame_length_ms = 25,
         .frame_shift_ms = 10,
-        .num_mel_bins = 23,
-        .fft_size = 512,
+        .num_mel_bins = 80,
+        .fft_size = 0,
         .dither = 0.0f,
         .preemph_coeff = 0.97f,
         .use_energy = 0,
         .low_freq = 20.0f,
-        .high_freq = 0.0f  // Will be set to Nyquist
+        .high_freq = 0.0f,
+        .remove_dc_offset = 1,
+        .round_to_power_of_two = 1,
+        .snip_edges = 1,
     };
     fbank_init(extractor, &config);
 }
 
 int32_t fbank_get_work_buffer_bytes(const FbankConfig *config) {
     if (!config) return -1;
-    if (config->fft_size <= 0 || config->fft_size > FBANK_MAX_FFT_SIZE) return -1;
-    if (config->num_mel_bins <= 0 || config->num_mel_bins > FBANK_MAX_MEL_BINS) return -1;
-
     int32_t frame_length = (config->sample_rate * config->frame_length_ms) / 1000;
+    int32_t fft_size = resolve_fft_size(config, frame_length);
+    if (fft_size <= 0 || fft_size > FBANK_MAX_FFT_SIZE) return -1;
+    if (config->num_mel_bins <= 0 || config->num_mel_bins > FBANK_MAX_MEL_BINS) return -1;
     if (frame_length <= 0 || frame_length > FBANK_MAX_FRAME_SIZE) return -1;
-    if (frame_length > config->fft_size) return -1;
+    if (frame_length > fft_size) return -1;
 
     // precomputed mode: frame_buffer + fft_real + fft_imag + power_spectrum
     // runtime mode: window + frame_buffer + fft_real + fft_imag + power_spectrum
 #ifdef FBANK_USE_PRECOMPUTED_TABLES
-    int32_t total_floats = frame_length + config->fft_size * 2 + (config->fft_size / 2 + 1);
+    int32_t total_floats = frame_length + fft_size * 2 + (fft_size / 2 + 1);
 #else
-    int32_t total_floats = frame_length * 2 + config->fft_size * 2 + (config->fft_size / 2 + 1);
+    int32_t total_floats = frame_length * 2 + fft_size * 2 + (fft_size / 2 + 1);
 #endif
     return (int32_t)(total_floats * (int32_t)sizeof(float));
 }
 
 int32_t fbank_init_with_buffer(FbankExtractor *extractor, const FbankConfig *config, void *work_buffer) {
     if (!extractor || !config || !work_buffer) return -1;
-    
-    // Validate parameters
-    if (config->num_mel_bins > FBANK_MAX_MEL_BINS) return -1;
-    if (config->fft_size > FBANK_MAX_FFT_SIZE) return -1;
-    
+
     // Copy configuration
     memcpy(&extractor->config, config, sizeof(FbankConfig));
-    
+
     // Calculate frame parameters
     extractor->frame_length = (config->sample_rate * config->frame_length_ms) / 1000;
     extractor->frame_shift = (config->sample_rate * config->frame_shift_ms) / 1000;
-    
+    extractor->config.fft_size = resolve_fft_size(config, extractor->frame_length);
+
+    // Validate parameters
+    if (extractor->config.num_mel_bins <= 0 || extractor->config.num_mel_bins > FBANK_MAX_MEL_BINS) return -1;
+    if (extractor->config.fft_size <= 0 || extractor->config.fft_size > FBANK_MAX_FFT_SIZE) return -1;
     if (extractor->frame_length > FBANK_MAX_FRAME_SIZE) return -1;
-    if (extractor->frame_length > config->fft_size) return -1;
-    
+    if (extractor->frame_length > extractor->config.fft_size) return -1;
+    if (extractor->frame_shift <= 0) return -1;
+
     // Assign external buffers (compact layout by active config)
     uint8_t* buf_ptr = (uint8_t*)work_buffer;
 
@@ -205,10 +233,10 @@ int32_t fbank_init_with_buffer(FbankExtractor *extractor, const FbankConfig *con
     buf_ptr += (size_t)extractor->frame_length * sizeof(float);
     
     extractor->fft_real = (float*)buf_ptr;
-    buf_ptr += (size_t)config->fft_size * sizeof(float);
+    buf_ptr += (size_t)extractor->config.fft_size * sizeof(float);
     
     extractor->fft_imag = (float*)buf_ptr;
-    buf_ptr += (size_t)config->fft_size * sizeof(float);
+    buf_ptr += (size_t)extractor->config.fft_size * sizeof(float);
     
     extractor->power_spectrum_buffer = (float*)buf_ptr;
     
@@ -218,7 +246,7 @@ int32_t fbank_init_with_buffer(FbankExtractor *extractor, const FbankConfig *con
     if (config->sample_rate != FBANK_TABLE_SAMPLE_RATE ||
         extractor->frame_length != FBANK_TABLE_FRAME_LENGTH ||
         config->num_mel_bins != FBANK_TABLE_NUM_MEL_BINS ||
-        config->fft_size != FBANK_TABLE_FFT_SIZE) {
+        extractor->config.fft_size != FBANK_TABLE_FFT_SIZE) {
         return -1;
     }
     extractor->window = FBANK_PRECOMPUTED_WINDOW;
@@ -233,7 +261,7 @@ int32_t fbank_init_with_buffer(FbankExtractor *extractor, const FbankConfig *con
 
 #ifdef USE_CMSIS_DSP
     MicroPrintf("before arm_rfft_fast_init_f32");
-    arm_rfft_fast_init_f32(&extractor->rfft_instance, (uint16_t)config->fft_size);
+    arm_rfft_fast_init_f32(&extractor->rfft_instance, (uint16_t)extractor->config.fft_size);
     MicroPrintf("after arm_rfft_fast_init_f32");
 #endif
 
@@ -258,8 +286,11 @@ void fbank_reset(FbankExtractor *extractor) {
 }
 
 int32_t fbank_num_frames(const FbankExtractor *extractor, int32_t num_samples) {
-    if (num_samples < extractor->frame_length) return 0;
-    return 1 + (num_samples - extractor->frame_length) / extractor->frame_shift;
+    if (extractor->config.snip_edges) {
+        if (num_samples < extractor->frame_length) return 0;
+        return 1 + (num_samples - extractor->frame_length) / extractor->frame_shift;
+    }
+    return (num_samples + extractor->frame_shift / 2) / extractor->frame_shift;
 }
 
 // Radix-2 FFT (Cooley-Tukey algorithm)
@@ -328,11 +359,27 @@ int32_t fbank_process_frame(FbankExtractor *extractor,
     if (frame_len != extractor->frame_length) return -1;
     
     const FbankConfig *cfg = &extractor->config;
+
+    memcpy(extractor->frame_buffer, frame, (size_t)frame_len * sizeof(float));
+
+    if (cfg->remove_dc_offset) {
+        float mean = 0.0f;
+        for (int32_t i = 0; i < frame_len; ++i) {
+            mean += extractor->frame_buffer[i];
+        }
+        mean /= (float)frame_len;
+        for (int32_t i = 0; i < frame_len; ++i) {
+            extractor->frame_buffer[i] -= mean;
+        }
+    }
     
     // Apply pre-emphasis (use first sample as state, matching Kaldi behavior)
-    extractor->frame_buffer[0] = frame[0] * (1.0f - cfg->preemph_coeff);
+    float prev_sample = extractor->frame_buffer[0];
+    extractor->frame_buffer[0] = extractor->frame_buffer[0] * (1.0f - cfg->preemph_coeff);
     for (int32_t i = 1; i < frame_len; i++) {
-        extractor->frame_buffer[i] = frame[i] - cfg->preemph_coeff * frame[i-1];
+        float current_sample = extractor->frame_buffer[i];
+        extractor->frame_buffer[i] = current_sample - cfg->preemph_coeff * prev_sample;
+        prev_sample = current_sample;
     }
     
     // Apply window
@@ -399,7 +446,8 @@ int32_t fbank_extract_float(FbankExtractor *extractor,
                              float *features,
                              int32_t max_frames) {
     if (!extractor || !samples || !features) return -1;
-    
+    if (!extractor->config.snip_edges) return -1;
+
     int32_t num_frames = fbank_num_frames(extractor, num_samples);
     if (num_frames > max_frames) num_frames = max_frames;
     
@@ -423,7 +471,8 @@ int32_t fbank_extract_int16(FbankExtractor *extractor,
                             float *features,
                             int32_t max_frames) {
     if (!extractor || !samples || !features) return -1;
-    
+    if (!extractor->config.snip_edges) return -1;
+
     int32_t num_frames = fbank_num_frames(extractor, num_samples);
     if (num_frames > max_frames) num_frames = max_frames;
     
