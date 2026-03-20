@@ -37,7 +37,7 @@ extern "C" {
 #ifdef FBANK_USE_PRECOMPUTED_TABLES
 #define FBANK_MAX_WORK_BUFFER_FLOATS (FBANK_MAX_FRAME_SIZE + FBANK_MAX_FFT_SIZE * 2 + FBANK_MAX_FFT_SIZE / 2 + 1)
 #else
-#define FBANK_MAX_WORK_BUFFER_FLOATS (FBANK_MAX_FRAME_SIZE * 2 + FBANK_MAX_FFT_SIZE * 2 + FBANK_MAX_FFT_SIZE / 2 + 1)
+#define FBANK_MAX_WORK_BUFFER_FLOATS (FBANK_MAX_FRAME_SIZE * 3 + FBANK_MAX_FFT_SIZE * 2 + FBANK_MAX_FFT_SIZE / 2 + 1)
 #endif
 #define FBANK_MAX_WORK_BUFFER_BYTES (FBANK_MAX_WORK_BUFFER_FLOATS * (int32_t)sizeof(float))
 
@@ -50,9 +50,8 @@ extern "C" {
 //   0 = use logf (default, better numerical parity)
 //   1 = use lightweight log approximation (smaller libm dependency footprint)
 //
-// FBANK_USE_PRECOMPUTED_TABLES 当前先默认不打开。
-// 这份 pybind 桌面封装需要支持动态 num_mel_bins/frame_length，
-// 固定表只适合 MCU 固定配置部署。
+// FBANK_USE_PRECOMPUTED_TABLES 可用于固定配置部署。
+// 当前 torch2lite pybind 也按固定表模式编译，以便和端侧前端保持一致。
 
 /**
  * @brief Sparse Mel filter bank representation
@@ -113,6 +112,22 @@ typedef struct {
     arm_rfft_fast_instance_f32 rfft_instance;
 #endif
 } FbankExtractor;
+
+/**
+ * @brief Stateful streaming fbank frontend.
+ *
+ * Accept arbitrary-length PCM updates and emit as many 1xnum_mel frames as are
+ * ready under the extractor's frame_length/frame_shift configuration.
+ */
+typedef struct {
+    FbankExtractor extractor;
+    void* work_buffer;
+    float* float_buffer;
+    int16_t* int16_buffer;
+    int32_t sample_capacity;
+    int32_t buffered_samples;
+    int32_t buffered_kind;  // 0=empty, 1=float, 2=int16
+} FbankStreamingState;
 
 /**
  * @brief Initialize fbank extractor with default configuration
@@ -184,12 +199,32 @@ int32_t fbank_process_frame(FbankExtractor *extractor,
                             int32_t frame_len,
                             float *fbank_out);
 
+int32_t fbank_process_frame_int16(FbankExtractor *extractor,
+                                  const int16_t *frame,
+                                  int32_t frame_len,
+                                  float *fbank_out);
+
 /**
  * @brief Reset extractor state (e.g., pre-emphasis)
  * 
  * @param extractor Pointer to FbankExtractor
  */
 void fbank_reset(FbankExtractor *extractor);
+
+int32_t fbank_stream_init(FbankStreamingState *state, const FbankConfig *config);
+void fbank_stream_reset(FbankStreamingState *state);
+void fbank_stream_free(FbankStreamingState *state);
+int32_t fbank_stream_pending_samples(const FbankStreamingState *state);
+int32_t fbank_stream_accept_float(FbankStreamingState *state,
+                                  const float *samples,
+                                  int32_t num_samples,
+                                  float *features,
+                                  int32_t max_frames);
+int32_t fbank_stream_accept_int16(FbankStreamingState *state,
+                                  const int16_t *samples,
+                                  int32_t num_samples,
+                                  float *features,
+                                  int32_t max_frames);
 
 /**
  * @brief Calculate number of frames for given number of samples

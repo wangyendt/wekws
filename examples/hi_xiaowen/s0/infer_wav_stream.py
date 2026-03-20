@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torchaudio
 
 import infer_wav as iw
 from torch2lite import fbank_pybind
@@ -168,6 +167,14 @@ class StreamingKeywordSpotter:
         self.left_context = int(dataset_conf.get("context_expansion_conf", {}).get("left", 0))
         self.right_context = int(dataset_conf.get("context_expansion_conf", {}).get("right", 0))
         self.resolution = self.frame_shift / 1000.0
+        self.fbank_stream_extractor = fbank_pybind.StreamingFbankExtractor(
+            num_mel_bins=self.num_mel_bins,
+            frame_length=self.frame_length,
+            frame_shift=self.frame_shift,
+            dither=0.0,
+            energy_floor=0.0,
+            sample_frequency=self.sample_rate,
+        )
 
         self.keywords = keywords
         self.keywords_token = keywords_token
@@ -180,7 +187,6 @@ class StreamingKeywordSpotter:
         self.interval_frames = interval_frames
         self.disable_threshold = disable_threshold
 
-        self.wave_remained = np.array([], dtype=np.int16)
         self.feature_remained = None
         self.feats_ctx_offset = 0
         self.in_cache = torch.zeros(0, 0, 0, dtype=torch.float32, device=device)
@@ -233,36 +239,32 @@ class StreamingKeywordSpotter:
             }
 
     def accept_wave_chunk(self, chunk_wave: np.ndarray) -> Optional[torch.Tensor]:
-        frame_length_samples = int(self.frame_length / 1000.0 * self.sample_rate)
-        frame_shift_samples = int(self.frame_shift / 1000.0 * self.sample_rate)
-        min_samples = frame_length_samples + self.right_context * frame_shift_samples
-
-        wave = np.concatenate([self.wave_remained, chunk_wave.astype(np.int16, copy=False)])
-        if wave.size < min_samples:
-            self.wave_remained = wave
+        chunk_pcm = chunk_wave.astype(np.int16, copy=False)
+        if chunk_pcm.size == 0:
             return None
 
-        wave_tensor = torch.from_numpy(wave.astype(np.float32)).unsqueeze(0)
-        feats = fbank_pybind.fbank(
-            wave_tensor,
-            num_mel_bins=self.num_mel_bins,
-            frame_length=self.frame_length,
-            frame_shift=self.frame_shift,
-            dither=0.0,
-            energy_floor=0.0,
-            sample_frequency=self.sample_rate,
+        chunk_tensor = torch.from_numpy(chunk_pcm)
+        feats = self.fbank_stream_extractor.accept_int16(
+            chunk_tensor, num_samples=int(chunk_tensor.numel())
         )
         feat_len = int(feats.size(0))
         if feat_len == 0:
-            self.wave_remained = wave
             return None
 
-        self.wave_remained = wave[feat_len * frame_shift_samples:]
+        # Kaldi reference path for future validation/debugging:
+        # import torchaudio.compliance.kaldi as kaldi
+        # ref_waveform = chunk_tensor.to(torch.float32).unsqueeze(0)
+        # ref_feats = kaldi.fbank(
+        #     ref_waveform,
+        #     num_mel_bins=self.num_mel_bins,
+        #     frame_length=self.frame_length,
+        #     frame_shift=self.frame_shift,
+        #     dither=0.0,
+        #     energy_floor=0.0,
+        #     sample_frequency=self.sample_rate,
+        # )
 
         if self.context_expansion:
-            if feat_len <= self.right_context:
-                self.wave_remained = wave
-                return None
             if self.feature_remained is None:
                 feats_pad = torch.nn.functional.pad(
                     feats.T, (self.left_context, 0), mode="replicate"
@@ -271,13 +273,18 @@ class StreamingKeywordSpotter:
                 feats_pad = torch.cat((self.feature_remained, feats))
 
             ctx_frm = feats_pad.shape[0] - (self.right_context + self.right_context)
+            if ctx_frm <= 0:
+                self.feature_remained = feats_pad.clone()
+                return None
+
             ctx_win = self.left_context + self.right_context + 1
             ctx_dim = feats.shape[1] * ctx_win
             feats_ctx = torch.zeros(ctx_frm, ctx_dim, dtype=torch.float32)
             for index in range(ctx_frm):
                 feats_ctx[index] = torch.cat(tuple(feats_pad[index:index + ctx_win])).unsqueeze(0)
 
-            self.feature_remained = feats[-(self.left_context + self.right_context):]
+            remained = self.left_context + self.right_context
+            self.feature_remained = feats_pad[-remained:].clone() if remained > 0 else None
             feats = feats_ctx
 
         if self.downsampling > 1:

@@ -253,7 +253,7 @@ int32_t fbank_get_work_buffer_bytes(const FbankConfig *config) {
 #ifdef FBANK_USE_PRECOMPUTED_TABLES
     int32_t total_floats = frame_length + fft_size * 2 + (fft_size / 2 + 1);
 #else
-    int32_t total_floats = frame_length * 2 + fft_size * 2 + (fft_size / 2 + 1);
+    int32_t total_floats = frame_length * 3 + fft_size * 2 + (fft_size / 2 + 1);
 #endif
     return (int32_t)(total_floats * (int32_t)sizeof(float));
 }
@@ -300,6 +300,10 @@ int32_t fbank_init_with_buffer(FbankExtractor *extractor, const FbankConfig *con
     buf_ptr += (size_t)extractor->config.fft_size * sizeof(float);
     
     extractor->power_spectrum_buffer = (float*)buf_ptr;
+    buf_ptr += (size_t)(extractor->config.fft_size / 2 + 1) * sizeof(float);
+#ifndef FBANK_USE_PRECOMPUTED_TABLES
+    extractor->conversion_buffer = (float*)buf_ptr;
+#endif
     
     // Initialize window + sparse mel filters
 #ifdef FBANK_USE_PRECOMPUTED_TABLES
@@ -355,6 +359,114 @@ int32_t fbank_num_frames(const FbankExtractor *extractor, int32_t num_samples) {
         return 1 + (num_samples - extractor->frame_length) / extractor->frame_shift;
     }
     return (num_samples + extractor->frame_shift / 2) / extractor->frame_shift;
+}
+
+static int32_t fbank_process_frame_int16_internal(FbankExtractor *extractor,
+                                                  const int16_t *frame,
+                                                  int32_t frame_len,
+                                                  float *fbank_out);
+
+
+static int32_t fbank_stream_reserve_float(FbankStreamingState *state, int32_t required_samples) {
+    if (!state) return -1;
+    if (required_samples <= state->sample_capacity) return 0;
+    int32_t new_capacity = state->sample_capacity > 0 ? state->sample_capacity : 1;
+    while (new_capacity < required_samples) {
+        if (new_capacity > INT32_MAX / 2) {
+            new_capacity = required_samples;
+            break;
+        }
+        new_capacity *= 2;
+    }
+    float *new_buffer = (float*)realloc(state->float_buffer, (size_t)new_capacity * sizeof(float));
+    if (!new_buffer) return -1;
+    state->float_buffer = new_buffer;
+    state->sample_capacity = new_capacity;
+    return 0;
+}
+
+static int32_t fbank_stream_reserve_int16(FbankStreamingState *state, int32_t required_samples) {
+    if (!state) return -1;
+    if (required_samples <= state->sample_capacity) return 0;
+    int32_t new_capacity = state->sample_capacity > 0 ? state->sample_capacity : 1;
+    while (new_capacity < required_samples) {
+        if (new_capacity > INT32_MAX / 2) {
+            new_capacity = required_samples;
+            break;
+        }
+        new_capacity *= 2;
+    }
+    int16_t *new_buffer = (int16_t*)realloc(state->int16_buffer, (size_t)new_capacity * sizeof(int16_t));
+    if (!new_buffer) return -1;
+    state->int16_buffer = new_buffer;
+    state->sample_capacity = new_capacity;
+    return 0;
+}
+
+static int32_t fbank_stream_emit_ready_frames_float(FbankStreamingState *state,
+                                                    float *features,
+                                                    int32_t max_frames) {
+    if (!state) return -1;
+    if (max_frames < 0) return -1;
+    if (max_frames == 0) return 0;
+    if (!features) return -1;
+
+    int32_t ready_frames = fbank_num_frames(&state->extractor, state->buffered_samples);
+    if (ready_frames > max_frames) ready_frames = max_frames;
+    for (int32_t i = 0; i < ready_frames; ++i) {
+        float *feat_out = features + i * state->extractor.config.num_mel_bins;
+        if (fbank_process_frame(&state->extractor,
+                                state->float_buffer + i * state->extractor.frame_shift,
+                                state->extractor.frame_length,
+                                feat_out) != 0) {
+            return -1;
+        }
+    }
+    if (ready_frames > 0) {
+        int32_t consumed = ready_frames * state->extractor.frame_shift;
+        int32_t remaining = state->buffered_samples - consumed;
+        if (remaining > 0) {
+            memmove(state->float_buffer,
+                    state->float_buffer + consumed,
+                    (size_t)remaining * sizeof(float));
+        }
+        state->buffered_samples = remaining;
+        if (remaining == 0) state->buffered_kind = 0;
+    }
+    return ready_frames;
+}
+
+static int32_t fbank_stream_emit_ready_frames_int16(FbankStreamingState *state,
+                                                    float *features,
+                                                    int32_t max_frames) {
+    if (!state) return -1;
+    if (max_frames < 0) return -1;
+    if (max_frames == 0) return 0;
+    if (!features) return -1;
+
+    int32_t ready_frames = fbank_num_frames(&state->extractor, state->buffered_samples);
+    if (ready_frames > max_frames) ready_frames = max_frames;
+    for (int32_t i = 0; i < ready_frames; ++i) {
+        float *feat_out = features + i * state->extractor.config.num_mel_bins;
+        if (fbank_process_frame_int16_internal(&state->extractor,
+                                               state->int16_buffer + i * state->extractor.frame_shift,
+                                               state->extractor.frame_length,
+                                               feat_out) != 0) {
+            return -1;
+        }
+    }
+    if (ready_frames > 0) {
+        int32_t consumed = ready_frames * state->extractor.frame_shift;
+        int32_t remaining = state->buffered_samples - consumed;
+        if (remaining > 0) {
+            memmove(state->int16_buffer,
+                    state->int16_buffer + consumed,
+                    (size_t)remaining * sizeof(int16_t));
+        }
+        state->buffered_samples = remaining;
+        if (remaining == 0) state->buffered_kind = 0;
+    }
+    return ready_frames;
 }
 
 // Radix-2 FFT (Cooley-Tukey algorithm)
@@ -413,6 +525,92 @@ void fft_radix2(float *real, float *imag, int32_t n) {
             }
         }
     }
+}
+
+static int32_t fbank_process_frame_int16_internal(FbankExtractor *extractor,
+                                                const int16_t *frame,
+                                                int32_t frame_len,
+                                                float *fbank_out) {
+    if (!extractor || !frame || !fbank_out) return -1;
+    if (frame_len != extractor->frame_length) return -1;
+
+#ifdef FBANK_USE_PRECOMPUTED_TABLES
+    const FbankConfig *cfg = &extractor->config;
+
+    for (int32_t j = 0; j < extractor->frame_length; j++) {
+        extractor->frame_buffer[j] = (float)frame[j];
+    }
+
+    if (cfg->remove_dc_offset) {
+        float mean = 0.0f;
+        for (int32_t j = 0; j < extractor->frame_length; ++j) {
+            mean += extractor->frame_buffer[j];
+        }
+        mean /= (float)extractor->frame_length;
+        for (int32_t j = 0; j < extractor->frame_length; ++j) {
+            extractor->frame_buffer[j] -= mean;
+        }
+    }
+
+    float prev_sample = extractor->frame_buffer[0];
+    extractor->frame_buffer[0] = extractor->frame_buffer[0] * (1.0f - cfg->preemph_coeff);
+    for (int32_t j = 1; j < extractor->frame_length; j++) {
+        float current_sample = extractor->frame_buffer[j];
+        extractor->frame_buffer[j] = current_sample - cfg->preemph_coeff * prev_sample;
+        prev_sample = current_sample;
+    }
+    for (int32_t j = 0; j < extractor->frame_length; j++) {
+        extractor->frame_buffer[j] *= extractor->window[j];
+    }
+
+    memset(extractor->fft_real, 0, extractor->config.fft_size * sizeof(float));
+    memcpy(extractor->fft_real, extractor->frame_buffer,
+           (size_t)extractor->frame_length * sizeof(float));
+
+    int32_t num_bins = extractor->config.fft_size / 2 + 1;
+    float* power_spectrum = extractor->power_spectrum_buffer;
+
+#ifdef USE_CMSIS_DSP
+    arm_rfft_fast_f32(&extractor->rfft_instance,
+                      extractor->fft_real, extractor->fft_imag, 0);
+    power_spectrum[0]          = extractor->fft_imag[0] * extractor->fft_imag[0];
+    power_spectrum[num_bins-1] = extractor->fft_imag[1] * extractor->fft_imag[1];
+    arm_cmplx_mag_squared_f32(&extractor->fft_imag[2],
+                              &power_spectrum[1],
+                              (uint32_t)(num_bins - 2));
+#else
+    memset(extractor->fft_imag, 0, extractor->config.fft_size * sizeof(float));
+    fft_radix2(extractor->fft_real, extractor->fft_imag, extractor->config.fft_size);
+    for (int32_t j = 0; j < num_bins; j++) {
+        power_spectrum[j] = extractor->fft_real[j] * extractor->fft_real[j] +
+                            extractor->fft_imag[j] * extractor->fft_imag[j];
+    }
+#endif
+
+    for (int32_t mel_i = 0; mel_i < extractor->config.num_mel_bins; mel_i++) {
+        float energy = 0.0f;
+        const SparseMelFilter* filter = &extractor->mel_filters[mel_i];
+        int32_t filter_width = filter->end_bin - filter->start_bin;
+        for (int32_t j = 0; j < filter_width; j++) {
+            int32_t fft_bin = filter->start_bin + j;
+            energy += filter->weights[j] * power_spectrum[fft_bin];
+        }
+        const float kaldi_energy_floor = 1.1925e-07f;
+        if (energy < kaldi_energy_floor) energy = kaldi_energy_floor;
+#ifdef FBANK_USE_FAST_LOG_APPROX
+        fbank_out[mel_i] = fast_log_approx(energy);
+#else
+        fbank_out[mel_i] = logf(energy);
+#endif
+    }
+    return 0;
+#else
+    if (!extractor->conversion_buffer) return -1;
+    for (int32_t j = 0; j < extractor->frame_length; j++) {
+        extractor->conversion_buffer[j] = (float)frame[j];
+    }
+    return fbank_process_frame(extractor, extractor->conversion_buffer, frame_len, fbank_out);
+#endif
 }
 
 int32_t fbank_process_frame(FbankExtractor *extractor,
@@ -504,6 +702,95 @@ int32_t fbank_process_frame(FbankExtractor *extractor,
     return 0;
 }
 
+int32_t fbank_process_frame_int16(FbankExtractor *extractor,
+                                  const int16_t *frame,
+                                  int32_t frame_len,
+                                  float *fbank_out) {
+    return fbank_process_frame_int16_internal(extractor, frame, frame_len, fbank_out);
+}
+
+int32_t fbank_stream_init(FbankStreamingState *state, const FbankConfig *config) {
+    if (!state || !config) return -1;
+    if (!config->snip_edges) return -1;
+    memset(state, 0, sizeof(*state));
+    int32_t work_buffer_bytes = fbank_get_work_buffer_bytes(config);
+    if (work_buffer_bytes <= 0) return -1;
+    state->work_buffer = malloc((size_t)work_buffer_bytes);
+    if (!state->work_buffer) return -1;
+    if (fbank_init_with_buffer(&state->extractor, config, state->work_buffer) != 0) {
+        free(state->work_buffer);
+        state->work_buffer = NULL;
+        return -1;
+    }
+    state->sample_capacity = 0;
+    state->float_buffer = nullptr;
+    state->int16_buffer = nullptr;
+    state->buffered_samples = 0;
+    state->buffered_kind = 0;
+    return 0;
+}
+
+void fbank_stream_reset(FbankStreamingState *state) {
+    if (!state) return;
+    free(state->float_buffer);
+    free(state->int16_buffer);
+    state->float_buffer = nullptr;
+    state->int16_buffer = nullptr;
+    state->sample_capacity = 0;
+    state->buffered_samples = 0;
+    state->buffered_kind = 0;
+    fbank_reset(&state->extractor);
+}
+
+void fbank_stream_free(FbankStreamingState *state) {
+    if (!state) return;
+    free(state->float_buffer);
+    free(state->int16_buffer);
+    free(state->work_buffer);
+    memset(state, 0, sizeof(*state));
+}
+
+int32_t fbank_stream_pending_samples(const FbankStreamingState *state) {
+    if (!state) return -1;
+    return state->buffered_samples;
+}
+
+int32_t fbank_stream_accept_float(FbankStreamingState *state,
+                                  const float *samples,
+                                  int32_t num_samples,
+                                  float *features,
+                                  int32_t max_frames) {
+    if (!state || num_samples < 0 || max_frames < 0) return -1;
+    if (num_samples > 0 && !samples) return -1;
+    if (state->buffered_kind != 0 && state->buffered_kind != 1) return -1;
+    if (num_samples == 0) {
+        return fbank_stream_emit_ready_frames_float(state, features, max_frames);
+    }
+    state->buffered_kind = 1;
+    if (fbank_stream_reserve_float(state, state->buffered_samples + num_samples) != 0) return -1;
+    memcpy(state->float_buffer + state->buffered_samples, samples, (size_t)num_samples * sizeof(float));
+    state->buffered_samples += num_samples;
+    return fbank_stream_emit_ready_frames_float(state, features, max_frames);
+}
+
+int32_t fbank_stream_accept_int16(FbankStreamingState *state,
+                                  const int16_t *samples,
+                                  int32_t num_samples,
+                                  float *features,
+                                  int32_t max_frames) {
+    if (!state || num_samples < 0 || max_frames < 0) return -1;
+    if (num_samples > 0 && !samples) return -1;
+    if (state->buffered_kind != 0 && state->buffered_kind != 2) return -1;
+    if (num_samples == 0) {
+        return fbank_stream_emit_ready_frames_int16(state, features, max_frames);
+    }
+    state->buffered_kind = 2;
+    if (fbank_stream_reserve_int16(state, state->buffered_samples + num_samples) != 0) return -1;
+    memcpy(state->int16_buffer + state->buffered_samples, samples, (size_t)num_samples * sizeof(int16_t));
+    state->buffered_samples += num_samples;
+    return fbank_stream_emit_ready_frames_int16(state, features, max_frames);
+}
+
 int32_t fbank_extract_float(FbankExtractor *extractor,
                              const float *samples,
                              int32_t num_samples,
@@ -543,72 +830,12 @@ int32_t fbank_extract_int16(FbankExtractor *extractor,
     for (int32_t i = 0; i < num_frames; i++) {
         int32_t offset = i * extractor->frame_shift;
         float *feat_out = features + i * extractor->config.num_mel_bins;
-
-#ifdef FBANK_USE_PRECOMPUTED_TABLES
-        // Inline int16 path: pre-emphasis + windowing fused, no conversion buffer needed.
-        extractor->frame_buffer[0] =
-            ((float)samples[offset]) * (1.0f - extractor->config.preemph_coeff);
-        for (int32_t j = 1; j < extractor->frame_length; j++) {
-            float cur = (float)samples[offset + j];
-            float prev = (float)samples[offset + j - 1];
-            extractor->frame_buffer[j] = cur - extractor->config.preemph_coeff * prev;
-        }
-        for (int32_t j = 0; j < extractor->frame_length; j++) {
-            extractor->frame_buffer[j] *= extractor->window[j];
-        }
-
-        memset(extractor->fft_real, 0, extractor->config.fft_size * sizeof(float));
-        memcpy(extractor->fft_real, extractor->frame_buffer,
-               (size_t)extractor->frame_length * sizeof(float));
-
-        int32_t num_bins = extractor->config.fft_size / 2 + 1;
-        float* power_spectrum = extractor->power_spectrum_buffer;
-
-#ifdef USE_CMSIS_DSP
-        arm_rfft_fast_f32(&extractor->rfft_instance,
-                          extractor->fft_real, extractor->fft_imag, 0);
-        power_spectrum[0]          = extractor->fft_imag[0] * extractor->fft_imag[0];
-        power_spectrum[num_bins-1] = extractor->fft_imag[1] * extractor->fft_imag[1];
-        arm_cmplx_mag_squared_f32(&extractor->fft_imag[2],
-                                  &power_spectrum[1],
-                                  (uint32_t)(num_bins - 2));
-#else
-        memset(extractor->fft_imag, 0, extractor->config.fft_size * sizeof(float));
-        fft_radix2(extractor->fft_real, extractor->fft_imag, extractor->config.fft_size);
-        for (int32_t j = 0; j < num_bins; j++) {
-            power_spectrum[j] = extractor->fft_real[j] * extractor->fft_real[j] +
-                                extractor->fft_imag[j] * extractor->fft_imag[j];
-        }
-#endif
-
-        for (int32_t mel_i = 0; mel_i < extractor->config.num_mel_bins; mel_i++) {
-            float energy = 0.0f;
-            const SparseMelFilter* filter = &extractor->mel_filters[mel_i];
-            int32_t filter_width = filter->end_bin - filter->start_bin;
-            for (int32_t j = 0; j < filter_width; j++) {
-                int32_t fft_bin = filter->start_bin + j;
-                energy += filter->weights[j] * power_spectrum[fft_bin];
-            }
-            const float kaldi_energy_floor = 1.1925e-07f;
-            if (energy < kaldi_energy_floor) energy = kaldi_energy_floor;
-#ifdef FBANK_USE_FAST_LOG_APPROX
-            // MicroPrintf("using FBANK_USE_FAST_LOG_APPROX");
-            feat_out[mel_i] = fast_log_approx(energy);
-#else
-            feat_out[mel_i] = logf(energy);
-#endif
-        }
-#else
-        // Original path: convert int16->float via conversion_buffer, then delegate to fbank_process_frame.
-        for (int32_t j = 0; j < extractor->frame_length; j++) {
-            extractor->conversion_buffer[j] = (float)samples[offset + j];
-        }
-        if (fbank_process_frame(extractor, extractor->conversion_buffer,
-                                extractor->frame_length, feat_out) != 0) {
+        if (fbank_process_frame_int16_internal(extractor,
+                                               samples + offset,
+                                               extractor->frame_length,
+                                               feat_out) != 0) {
             return -1;
         }
-#endif
-
     }
     
     return num_frames;
