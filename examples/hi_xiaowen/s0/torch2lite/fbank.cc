@@ -142,6 +142,49 @@ static int32_t init_mel_banks(FbankExtractor *extractor) {
 }
 #endif
 
+#ifdef FBANK_USE_PRECOMPUTED_TABLES
+static int32_t validate_precomputed_table_config(const FbankExtractor *extractor,
+                                                 const FbankConfig *config) {
+    float nyquist = config->sample_rate / 2.0f;
+    float high_freq = config->high_freq;
+
+    // Match the normalization used by the runtime mel-bank path.
+    if (high_freq <= 0.0f) {
+        high_freq += nyquist;
+    }
+    if (high_freq > nyquist) {
+        high_freq = nyquist;
+    }
+
+    if (config->sample_rate != FBANK_TABLE_SAMPLE_RATE) {
+        MicroPrintf("FBANK precomputed sample_rate mismatch");
+        return -1;
+    }
+    if (extractor->frame_length != FBANK_TABLE_FRAME_LENGTH) {
+        MicroPrintf("FBANK precomputed frame_length mismatch");
+        return -1;
+    }
+    if (config->num_mel_bins != FBANK_TABLE_NUM_MEL_BINS) {
+        MicroPrintf("FBANK precomputed num_mel_bins mismatch");
+        return -1;
+    }
+    if (extractor->config.fft_size != FBANK_TABLE_FFT_SIZE) {
+        MicroPrintf("FBANK precomputed fft_size mismatch");
+        return -1;
+    }
+    if (fabsf(config->low_freq - FBANK_TABLE_LOW_FREQ) > 1.0e-4f) {
+        MicroPrintf("FBANK precomputed low_freq mismatch");
+        return -1;
+    }
+    if (fabsf(high_freq - FBANK_TABLE_HIGH_FREQ) > 1.0e-4f) {
+        MicroPrintf("FBANK precomputed high_freq mismatch");
+        return -1;
+    }
+
+    return 0;
+}
+#endif
+
 #ifdef FBANK_USE_FAST_LOG_APPROX
 // Lightweight ln(x) approximation for x > 0.
 // Helps reduce libm footprint on constrained MCU builds.
@@ -186,10 +229,24 @@ int32_t fbank_get_work_buffer_bytes(const FbankConfig *config) {
     if (!config) return -1;
     int32_t frame_length = (config->sample_rate * config->frame_length_ms) / 1000;
     int32_t fft_size = resolve_fft_size(config, frame_length);
-    if (fft_size <= 0 || fft_size > FBANK_MAX_FFT_SIZE) return -1;
+    if (fft_size <= 0) return -1;
     if (config->num_mel_bins <= 0 || config->num_mel_bins > FBANK_MAX_MEL_BINS) return -1;
-    if (frame_length <= 0 || frame_length > FBANK_MAX_FRAME_SIZE) return -1;
+    if (frame_length <= 0) return -1;
     if (frame_length > fft_size) return -1;
+
+#ifdef FBANK_USE_PRECOMPUTED_TABLES
+    // Fixed-table mode sizes buffers from the selected offline table.
+    // This allows MCU builds to use larger fixed frame/FFT sizes than the
+    // desktop-oriented FBANK_MAX_* defaults, as long as the config matches.
+    if (frame_length != FBANK_TABLE_FRAME_LENGTH ||
+        fft_size != FBANK_TABLE_FFT_SIZE ||
+        config->num_mel_bins != FBANK_TABLE_NUM_MEL_BINS) {
+        return -1;
+    }
+#else
+    if (fft_size > FBANK_MAX_FFT_SIZE) return -1;
+    if (frame_length > FBANK_MAX_FRAME_SIZE) return -1;
+#endif
 
     // precomputed mode: frame_buffer + fft_real + fft_imag + power_spectrum
     // runtime mode: window + frame_buffer + fft_real + fft_imag + power_spectrum
@@ -214,10 +271,14 @@ int32_t fbank_init_with_buffer(FbankExtractor *extractor, const FbankConfig *con
 
     // Validate parameters
     if (extractor->config.num_mel_bins <= 0 || extractor->config.num_mel_bins > FBANK_MAX_MEL_BINS) return -1;
-    if (extractor->config.fft_size <= 0 || extractor->config.fft_size > FBANK_MAX_FFT_SIZE) return -1;
-    if (extractor->frame_length > FBANK_MAX_FRAME_SIZE) return -1;
+    if (extractor->config.fft_size <= 0) return -1;
+    if (extractor->frame_length <= 0) return -1;
     if (extractor->frame_length > extractor->config.fft_size) return -1;
     if (extractor->frame_shift <= 0) return -1;
+#ifndef FBANK_USE_PRECOMPUTED_TABLES
+    if (extractor->config.fft_size > FBANK_MAX_FFT_SIZE) return -1;
+    if (extractor->frame_length > FBANK_MAX_FRAME_SIZE) return -1;
+#endif
 
     // Assign external buffers (compact layout by active config)
     uint8_t* buf_ptr = (uint8_t*)work_buffer;
@@ -243,10 +304,7 @@ int32_t fbank_init_with_buffer(FbankExtractor *extractor, const FbankConfig *con
     // Initialize window + sparse mel filters
 #ifdef FBANK_USE_PRECOMPUTED_TABLES
     // Fixed-table mode: use precomputed constants generated offline.
-    if (config->sample_rate != FBANK_TABLE_SAMPLE_RATE ||
-        extractor->frame_length != FBANK_TABLE_FRAME_LENGTH ||
-        config->num_mel_bins != FBANK_TABLE_NUM_MEL_BINS ||
-        extractor->config.fft_size != FBANK_TABLE_FFT_SIZE) {
+    if (validate_precomputed_table_config(extractor, config) != 0) {
         return -1;
     }
     extractor->window = FBANK_PRECOMPUTED_WINDOW;
@@ -276,7 +334,13 @@ int32_t fbank_init(FbankExtractor *extractor, const FbankConfig *config) {
     // Buffer layout:
     //   precomputed mode: frame_buffer + fft_real + fft_imag + power_spectrum
     //   runtime mode: window + frame_buffer + fft_real + fft_imag + power_spectrum
+#ifdef FBANK_USE_PRECOMPUTED_TABLES
+    static float static_work_buffer[FBANK_TABLE_FRAME_LENGTH +
+                                    FBANK_TABLE_FFT_SIZE * 2 +
+                                    (FBANK_TABLE_FFT_SIZE / 2 + 1)];
+#else
     static float static_work_buffer[FBANK_MAX_WORK_BUFFER_FLOATS];
+#endif
     return fbank_init_with_buffer(extractor, config, static_work_buffer);
 }
 
