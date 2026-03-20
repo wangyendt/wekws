@@ -3,12 +3,14 @@
 import argparse
 import json
 import math
+import numpy as np
 import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import tensorflow as tf
 import torch
 import torchaudio
 import torchaudio.compliance.kaldi as kaldi
@@ -367,6 +369,11 @@ def load_model(checkpoint_path: Path, configs: Dict, gpu: int):
     suffix = checkpoint_path.suffix.lower()
     if suffix == ".pte":
         raise ValueError("当前脚本暂不支持 ExecuTorch .pte，请先使用 .pt 或 .zip 模型。")
+    if suffix == ".tflite":
+        interpreter = tf.lite.Interpreter(model_path=str(checkpoint_path))
+        device = torch.device("cpu")
+        return interpreter, device, "tflite"
+
     is_jit = suffix == ".zip"
 
     if is_jit:
@@ -384,7 +391,7 @@ def load_model(checkpoint_path: Path, configs: Dict, gpu: int):
         model = model.to(device)
 
     model.eval()
-    return model, device, is_jit
+    return model, device, "jit" if is_jit else "torch"
 
 
 def get_time_resolution_sec(configs: Dict) -> float:
@@ -476,10 +483,52 @@ def build_input_features(wav_path: Path, configs: Dict) -> torch.Tensor:
     return feats.unsqueeze(0)
 
 
-def run_model_forward(model, feats: torch.Tensor, device: torch.device, is_jit: bool) -> torch.Tensor:
+def prepare_tflite_input(feats: torch.Tensor, target_shape) -> np.ndarray:
+    if len(target_shape) != 3:
+        raise ValueError(f"TFLite 输入 shape 异常: {target_shape}")
+
+    batch_size, target_frames, feat_dim = target_shape
+    if batch_size != 1:
+        raise ValueError(f"当前脚本只支持 batch=1 的 TFLite 输入，收到: {target_shape}")
+    if feats.dim() != 3 or feats.size(0) != 1:
+        raise ValueError(f"当前脚本期望输入特征 shape 为 (1, T, D)，收到: {tuple(feats.shape)}")
+    if feats.size(2) != feat_dim:
+        raise ValueError(f"TFLite 输入维度不匹配，期望 {feat_dim}，收到 {feats.size(2)}")
+
+    current_frames = feats.size(1)
+    if current_frames < target_frames:
+        padded = torch.zeros((1, target_frames, feat_dim), dtype=feats.dtype)
+        padded[:, :current_frames, :] = feats
+        return padded.numpy().astype(np.float32)
+    return feats[:, :target_frames, :].numpy().astype(np.float32)
+
+
+def run_model_forward(model, feats: torch.Tensor, device: torch.device, model_type: str) -> torch.Tensor:
+    if model_type == "tflite":
+        input_detail = model.get_input_details()[0]
+        output_detail = model.get_output_details()[0]
+        input_shape = tuple(int(dim) for dim in input_detail["shape"])
+        shape_signature = tuple(int(dim) for dim in input_detail.get("shape_signature", input_shape))
+        current_shape = (1, int(feats.size(1)), int(feats.size(2)))
+        if any(dim <= 0 for dim in shape_signature):
+            target_shape = tuple(
+                current_shape[index] if shape_signature[index] <= 0 else input_shape[index]
+                for index in range(len(input_shape))
+            )
+            model.resize_tensor_input(input_detail["index"], target_shape, strict=False)
+            model.allocate_tensors()
+        else:
+            target_shape = input_shape
+            model.allocate_tensors()
+        input_data = prepare_tflite_input(feats.cpu(), target_shape)
+        model.set_tensor(input_detail["index"], input_data.astype(input_detail["dtype"]))
+        model.invoke()
+        logits = torch.from_numpy(model.get_tensor(output_detail["index"]))
+        return logits.softmax(2)[0]
+
     feats = feats.to(device)
     with torch.no_grad():
-        if is_jit:
+        if model_type == "jit":
             empty_cache = torch.zeros(0, 0, 0, dtype=torch.float32, device=device)
             logits, _ = model(feats, empty_cache)
         else:
@@ -715,9 +764,9 @@ def main():
 
     model_info = resolve_model_paths(args)
     configs = load_config(model_info["config"])
-    model, device, is_jit = load_model(model_info["checkpoint"], configs, args.gpu)
+    model, device, model_type = load_model(model_info["checkpoint"], configs, args.gpu)
     feats = build_input_features(wav_path, configs)
-    probs = run_model_forward(model, feats, device, is_jit)
+    probs = run_model_forward(model, feats, device, model_type)
     decode_result = decode_keyword_hit(probs, keywords, model_info["dict_dir"])
     threshold_map = load_threshold_map(args, model_info, keywords)
     time_resolution_sec = get_time_resolution_sec(configs)
