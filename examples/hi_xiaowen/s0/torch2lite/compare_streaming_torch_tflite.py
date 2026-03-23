@@ -13,22 +13,15 @@ from export_streaming_litert_tflite import (
     load_streaming_wrapper,
     resolve_streaming_output_path,
 )
+from tflite_quant_utils import (
+    dequantize_from_detail,
+    load_tflite_interpreter,
+    quantize_to_detail,
+)
 
 
 def load_interpreter(model_path: Path):
-    try:
-        import tensorflow as tf
-
-        return tf.lite.Interpreter(model_path=str(model_path))
-    except ImportError:
-        try:
-            from tflite_runtime.interpreter import Interpreter
-
-            return Interpreter(model_path=str(model_path))
-        except ImportError as exc:
-            raise RuntimeError(
-                "Neither tensorflow nor tflite_runtime is available in the current environment."
-            ) from exc
+    return load_tflite_interpreter(model_path)
 
 
 def pick_io_details(interpreter):
@@ -133,11 +126,23 @@ def main():
             torch_logits = torch_logits.cpu().numpy()
             torch_cache_np = torch_cache.cpu().numpy()
 
-        interpreter.set_tensor(feat_input["index"], feats.astype(feat_input["dtype"]))
-        interpreter.set_tensor(cache_input["index"], tflite_cache.astype(cache_input["dtype"]))
+        interpreter.set_tensor(
+            feat_input["index"],
+            quantize_to_detail(feats, feat_input),
+        )
+        interpreter.set_tensor(
+            cache_input["index"],
+            quantize_to_detail(tflite_cache, cache_input),
+        )
         interpreter.invoke()
-        tflite_logits = interpreter.get_tensor(logits_output["index"])
-        tflite_cache = interpreter.get_tensor(cache_output["index"])
+        tflite_logits = dequantize_from_detail(
+            interpreter.get_tensor(logits_output["index"]),
+            logits_output,
+        )
+        tflite_cache = dequantize_from_detail(
+            interpreter.get_tensor(cache_output["index"]),
+            cache_output,
+        )
 
         logits_diff = tflite_logits.astype(np.float64) - torch_logits.astype(np.float64)
         logits_abs = np.abs(logits_diff)

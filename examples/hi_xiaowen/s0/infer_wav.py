@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import tensorflow as tf
 import torch
 import torchaudio
 import torchaudio.compliance.kaldi as kaldi
@@ -18,6 +17,11 @@ import yaml
 from wenet.text.char_tokenizer import CharTokenizer
 
 from torch2lite import fbank_pybind
+from torch2lite.tflite_quant_utils import (
+    dequantize_from_detail,
+    load_tflite_interpreter,
+    quantize_to_detail,
+)
 from wekws.model.kws_model import init_model
 from wekws.model.loss import ctc_prefix_beam_search
 from wekws.utils.checkpoint import load_checkpoint
@@ -370,7 +374,7 @@ def load_model(checkpoint_path: Path, configs: Dict, gpu: int):
     if suffix == ".pte":
         raise ValueError("当前脚本暂不支持 ExecuTorch .pte，请先使用 .pt 或 .zip 模型。")
     if suffix == ".tflite":
-        interpreter = tf.lite.Interpreter(model_path=str(checkpoint_path))
+        interpreter = load_tflite_interpreter(checkpoint_path)
         device = torch.device("cpu")
         return interpreter, device, "tflite"
 
@@ -521,9 +525,14 @@ def run_model_forward(model, feats: torch.Tensor, device: torch.device, model_ty
             target_shape = input_shape
             model.allocate_tensors()
         input_data = prepare_tflite_input(feats.cpu(), target_shape)
-        model.set_tensor(input_detail["index"], input_data.astype(input_detail["dtype"]))
+        model.set_tensor(
+            input_detail["index"],
+            quantize_to_detail(input_data, input_detail),
+        )
         model.invoke()
-        logits = torch.from_numpy(model.get_tensor(output_detail["index"]))
+        logits = torch.from_numpy(
+            dequantize_from_detail(model.get_tensor(output_detail["index"]), output_detail)
+        )
         return logits.softmax(2)[0]
 
     feats = feats.to(device)

@@ -12,6 +12,7 @@ import torch
 
 import infer_wav as iw
 from torch2lite import fbank_pybind
+from torch2lite.tflite_quant_utils import dequantize_from_detail, quantize_to_detail
 
 
 def parse_args():
@@ -306,15 +307,21 @@ class StreamingKeywordSpotter:
                 frame = feats[frame_index:frame_index + 1].unsqueeze(0).cpu().numpy().astype(np.float32)
                 self.model.set_tensor(
                     self.tflite_feat_input_detail["index"],
-                    frame.astype(self.tflite_feat_input_detail["dtype"]),
+                    quantize_to_detail(frame, self.tflite_feat_input_detail),
                 )
                 self.model.set_tensor(
                     self.tflite_cache_input_detail["index"],
-                    self.in_cache.astype(self.tflite_cache_input_detail["dtype"]),
+                    quantize_to_detail(self.in_cache, self.tflite_cache_input_detail),
                 )
                 self.model.invoke()
-                logits = self.model.get_tensor(self.tflite_logits_output_detail["index"])
-                self.in_cache = self.model.get_tensor(self.tflite_cache_output_detail["index"]).astype(np.float32)
+                logits = dequantize_from_detail(
+                    self.model.get_tensor(self.tflite_logits_output_detail["index"]),
+                    self.tflite_logits_output_detail,
+                )
+                self.in_cache = dequantize_from_detail(
+                    self.model.get_tensor(self.tflite_cache_output_detail["index"]),
+                    self.tflite_cache_output_detail,
+                )
                 probs_list.append(torch.from_numpy(logits).softmax(2)[0])
             return torch.cat(probs_list, dim=0).cpu()
 

@@ -4,7 +4,6 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import tensorflow as tf
 import torch
 
 from export_litert_tflite import (
@@ -13,10 +12,15 @@ from export_litert_tflite import (
     load_logits_wrapper,
     resolve_output_path,
 )
+from tflite_quant_utils import (
+    dequantize_from_detail,
+    load_tflite_interpreter,
+    quantize_to_detail,
+)
 
 
 def load_interpreter(model_path: Path):
-    return tf.lite.Interpreter(model_path=str(model_path))
+    return load_tflite_interpreter(model_path)
 
 
 def parse_args():
@@ -103,9 +107,15 @@ def main():
         with torch.no_grad():
             torch_logits = wrapper(torch_input).cpu().numpy()
 
-        interpreter.set_tensor(input_detail["index"], sample.astype(input_detail["dtype"]))
+        interpreter.set_tensor(
+            input_detail["index"],
+            quantize_to_detail(sample, input_detail),
+        )
         interpreter.invoke()
-        tflite_logits = interpreter.get_tensor(output_detail["index"])
+        tflite_logits = dequantize_from_detail(
+            interpreter.get_tensor(output_detail["index"]),
+            output_detail,
+        )
 
         diff = tflite_logits.astype(np.float64) - torch_logits.astype(np.float64)
         abs_diff = np.abs(diff)
