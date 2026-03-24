@@ -70,6 +70,7 @@ def parse_args():
     parser.add_argument("--progress_every", type=int, default=1000, help="每处理多少条打印一次进度")
     parser.add_argument("--streaming", action="store_true", help="按流式方式评测，每条 wav 按 chunk 模拟在线输入")
     parser.add_argument("--chunk_ms", type=float, default=1000.0, help="流式评测时每次送入的音频 chunk 时长，批量评测建议 1000~2000ms")
+    parser.add_argument("--use_cpp_decoder", action="store_true", help="流式评测时使用 C++ pybind beam search / keyword detection")
     parser.add_argument("--indent", type=int, default=2, help="JSON 缩进空格数")
     return parser.parse_args()
 
@@ -284,6 +285,11 @@ def worker_eval(
         if args.streaming:
             shard_items = load_eval_items(shard_list_path, 0)
             lookahead_sec = iws.compute_streaming_lookahead_sec(configs)
+            decode_mode = (
+                "streaming_cpp_ctc_prefix_beam"
+                if args.use_cpp_decoder
+                else "streaming_python_ctc_prefix_beam"
+            )
             for meta in shard_items:
                 key = meta["key"]
                 wav_path = iw.to_abs_path(meta["wav"])
@@ -302,25 +308,12 @@ def worker_eval(
                     max_frames=250,
                     interval_frames=50,
                     disable_threshold=False,
+                    use_cpp_decoder=args.use_cpp_decoder,
                 )
                 waveform = iw.load_wav_and_resample(wav_path, streamer.sample_rate)
                 waveform = waveform.squeeze(0).numpy()
                 pcm = np.clip(np.round(waveform * (1 << 15)), -32768, 32767).astype(np.int16)
-                probs = iws.collect_streaming_probs(streamer, pcm, args.chunk_ms)
-                if probs.size(0) > 0:
-                    decode_result = iw.decode_keyword_hit_with_token_info(
-                        probs=probs,
-                        keywords=keywords,
-                        keywords_token=keywords_token,
-                        keywords_idxset=keywords_idxset,
-                    )
-                else:
-                    decode_result = {
-                        "candidate_keyword": None,
-                        "candidate_score": None,
-                        "start_frame": None,
-                        "end_frame": None,
-                    }
+                decode_result = iws.collect_streaming_best_decode(streamer, pcm, args.chunk_ms)
                 score_fout.write(score_line_from_decode(key, decode_result))
                 result = build_result_from_meta(
                     meta=meta,
@@ -330,16 +323,17 @@ def worker_eval(
                     time_resolution_sec=time_resolution_sec,
                 )
                 result["mode"] = "streaming"
-                result["decode_mode"] = "offline_ctc_prefix_beam"
+                result["decode_mode"] = decode_mode
                 result["chunk_ms"] = args.chunk_ms
                 result["streaming_lookahead_sec"] = lookahead_sec
                 result["model_type"] = model_type
+                result["use_cpp_decoder"] = args.use_cpp_decoder
                 jsonl_fout.write(json.dumps(result, ensure_ascii=False) + "\n")
                 processed += 1
 
                 if args.progress_every > 0 and processed % args.progress_every == 0:
                     print(
-                        f"[worker {worker_id}] processed {processed}/{num_items} on gpu={gpu_id} streaming=1",
+                        f"[worker {worker_id}] processed {processed}/{num_items} on gpu={gpu_id} streaming=1 cpp={int(args.use_cpp_decoder)}",
                         flush=True,
                     )
         else:
@@ -394,14 +388,20 @@ def merge_text_files(part_paths: List[Path], merged_path: Path):
                 shutil.copyfileobj(fin, fout)
 
 
-def run_compute_det(args, model_info: Dict[str, Optional[Path]], result_dir: Path, score_file: Path):
+def run_compute_det(
+    args,
+    model_info: Dict[str, Optional[Path]],
+    result_dir: Path,
+    score_file: Path,
+    test_data_path: Path,
+):
     cmd = [
         sys.executable,
         "wekws/bin/compute_det_ctc.py",
         "--keywords",
         args.keywords,
         "--test_data",
-        str(Path(args.test_data).resolve()),
+        str(test_data_path.resolve()),
         "--window_shift",
         str(args.window_shift),
         "--step",
@@ -477,6 +477,12 @@ def write_shard_lists(items: List[Dict], num_shards: int, temp_dir: Path) -> Lis
                 fout.write(json.dumps(row, ensure_ascii=False) + "\n")
         shard_paths.append(shard_path)
     return shard_paths
+
+
+def write_eval_list(items: List[Dict], output_path: Path):
+    with open(output_path, "w", encoding="utf8") as fout:
+        for item in items:
+            fout.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
 def write_summary_json(
@@ -566,6 +572,8 @@ def main():
     ensure_clean_dir(temp_dir)
 
     items = load_eval_items(test_data, args.max_utts)
+    selected_test_data = temp_dir / "selected_test_data.list"
+    write_eval_list(items, selected_test_data)
     gpu_list = parse_gpu_list(args.gpus)
     shard_paths = write_shard_lists(items, len(gpu_list), temp_dir)
     if len(gpu_list) == 1:
@@ -612,7 +620,7 @@ def main():
     merge_text_files(score_parts, score_file)
     merge_text_files(jsonl_parts, results_jsonl)
 
-    run_compute_det(args, model_info, result_dir, score_file)
+    run_compute_det(args, model_info, result_dir, score_file, selected_test_data)
     summary_rows = summarize_stats(args, result_dir)
     write_summary_json(args, model_info, result_dir, score_file, results_jsonl, summary_rows, items)
     print_summary(result_dir, summary_rows)

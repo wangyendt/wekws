@@ -12,6 +12,7 @@ import torch
 
 import infer_wav as iw
 from torch2lite import fbank_pybind
+from torch2lite.ctc_decoder_pybind import StreamingCTCDecoder as CppStreamingCTCDecoder
 from torch2lite.tflite_quant_utils import dequantize_from_detail, quantize_to_detail
 
 
@@ -67,6 +68,7 @@ def parse_args():
     parser.add_argument("--max_frames", type=int, default=250, help="关键词最长帧数")
     parser.add_argument("--interval_frames", type=int, default=50, help="两次连续触发的最小间隔帧数")
     parser.add_argument("--indent", type=int, default=2, help="JSON 输出缩进空格数")
+    parser.add_argument("--use_cpp_decoder", action="store_true", help="使用 C++ pybind 后处理（beam search + keyword detection）")
     return parser.parse_args()
 
 
@@ -153,6 +155,7 @@ class StreamingKeywordSpotter:
         max_frames: int,
         interval_frames: int,
         disable_threshold: bool,
+        use_cpp_decoder: bool = False,
     ):
         dataset_conf = configs["dataset_conf"]
         fbank_conf = dataset_conf["fbank_conf"]
@@ -228,6 +231,18 @@ class StreamingKeywordSpotter:
             "start_frame": None,
             "end_frame": None,
         }
+
+        self.use_cpp_decoder = use_cpp_decoder
+        if use_cpp_decoder:
+            self._cpp_decoder = CppStreamingCTCDecoder(
+                score_beam_size=score_beam_size,
+                path_beam_size=path_beam_size,
+                min_frames=min_frames,
+                max_frames=max_frames,
+                interval_frames=interval_frames,
+            )
+            self._cpp_decoder.set_keywords(keywords_token, keywords_idxset)
+            self._cpp_decoder.set_thresholds(threshold_map)
 
     def _update_best_decode(self, keyword, score, start_frame, end_frame):
         current = self.best_decode["candidate_score"]
@@ -373,38 +388,79 @@ class StreamingKeywordSpotter:
                 return None
         return None
 
-    def forward_chunk(self, chunk_wave: np.ndarray) -> Optional[Dict[str, object]]:
+    def _normalize_cpp_result(self, cpp_result: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
+        if cpp_result is None:
+            return None
+        return {
+            "candidate_keyword": cpp_result["keyword"],
+            "candidate_score": cpp_result["candidate_score"],
+            "start_frame": cpp_result["start_frame"],
+            "end_frame": cpp_result["end_frame"],
+        }
+
+    def _step_decoder(self, absolute_frame: int, prob: torch.Tensor) -> Optional[Dict[str, object]]:
+        if self.use_cpp_decoder:
+            self._cpp_decoder.advance_frame(absolute_frame, prob)
+            return self._normalize_cpp_result(
+                self._cpp_decoder.execute_detection(self.disable_threshold)
+            )
+
+        self.cur_hyps = streaming_ctc_prefix_beam_search_step(
+            absolute_frame,
+            prob,
+            self.cur_hyps,
+            self.keywords_idxset,
+            self.score_beam_size,
+        )[:self.path_beam_size]
+        return self._execute_detection(absolute_frame)
+
+    def _get_first_hyp_start_frame(self) -> int:
+        if self.use_cpp_decoder:
+            return self._cpp_decoder.get_first_hyp_start_frame()
+        if self.cur_hyps and self.cur_hyps[0][0]:
+            return int(self.cur_hyps[0][1][2][0]["frame"])
+        return -1
+
+    def forward_chunk(
+        self,
+        chunk_wave: np.ndarray,
+        stop_on_activation: bool = True,
+        reset_on_activation: bool = True,
+    ) -> Optional[Dict[str, object]]:
         feats = self.accept_wave_chunk(chunk_wave)
         if feats is None or feats.size(0) < 1:
             return None
 
         probs = self._forward_model(feats)
-        activated_result = None
+        last_activation = None
+
         for local_frame_index, prob in enumerate(probs):
             absolute_frame = self.total_frames + local_frame_index * self.downsampling
-            self.cur_hyps = streaming_ctc_prefix_beam_search_step(
-                absolute_frame,
-                prob,
-                self.cur_hyps,
-                self.keywords_idxset,
-                self.score_beam_size,
-            )[:self.path_beam_size]
-            activated_result = self._execute_detection(absolute_frame)
-            if activated_result is not None:
+            activation = self._step_decoder(absolute_frame, prob)
+            if activation is None:
+                continue
+            last_activation = activation
+            if reset_on_activation:
                 self.reset_decode_state()
+            if stop_on_activation:
                 break
 
         self.total_frames += len(probs) * self.downsampling
-        if self.cur_hyps and self.cur_hyps[0][0]:
-            keyword_may_start = int(self.cur_hyps[0][1][2][0]["frame"])
-            if (self.total_frames - keyword_may_start) > self.max_frames:
-                self.reset_decode_state()
-        return activated_result
+        start = self._get_first_hyp_start_frame()
+        if start >= 0 and (self.total_frames - start) > self.max_frames:
+            self.reset_decode_state()
+
+        return last_activation
 
     def reset_decode_state(self):
+        if self.use_cpp_decoder:
+            self._cpp_decoder.reset_beam_search()
+            return
         self.cur_hyps = [(tuple(), (1.0, 0.0, []))]
 
     def get_best_decode_result(self) -> Dict[str, object]:
+        if self.use_cpp_decoder:
+            return self._cpp_decoder.get_best_decode_result()
         return dict(self.best_decode)
 
 
@@ -435,6 +491,19 @@ def collect_streaming_probs(streamer: StreamingKeywordSpotter, pcm: np.ndarray, 
     if not probs_list:
         return torch.zeros((0, 0), dtype=torch.float32)
     return torch.cat(probs_list, dim=0)
+
+
+def collect_streaming_best_decode(
+    streamer: StreamingKeywordSpotter, pcm: np.ndarray, chunk_ms: float
+) -> Dict[str, object]:
+    chunk_samples = max(1, int(chunk_ms / 1000.0 * streamer.sample_rate))
+    for start in range(0, pcm.shape[0], chunk_samples):
+        streamer.forward_chunk(
+            pcm[start:start + chunk_samples],
+            stop_on_activation=False,
+            reset_on_activation=False,
+        )
+    return streamer.get_best_decode_result()
 
 
 def main():
@@ -468,6 +537,7 @@ def main():
         max_frames=args.max_frames,
         interval_frames=args.interval_frames,
         disable_threshold=args.disable_threshold,
+        use_cpp_decoder=args.use_cpp_decoder,
     )
 
     waveform = iw.load_wav_and_resample(wav_path, streamer.sample_rate)
@@ -500,6 +570,7 @@ def main():
     result["chunk_ms"] = args.chunk_ms
     result["streaming_lookahead_sec"] = compute_streaming_lookahead_sec(configs)
     result["model_type"] = model_type
+    result["use_cpp_decoder"] = args.use_cpp_decoder
     print(json.dumps(result, ensure_ascii=False, indent=args.indent))
 
 
