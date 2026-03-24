@@ -30,6 +30,7 @@
 | **INT8 PTQ（Torch/离线）** | 位数 ↓ | 229 → 229_int8 **轻微掉点** | 可接受 |
 | **LiteRT 流式 FP32（S3）** | TFLite step | 与离线 infer **同量级** | 导出链路对齐好 |
 | **LiteRT 流式 INT8（S3）** | 同上 | 相对 FP32 **明显回退** | 需继续优化 PTQ/校准等 |
+| **LiteRT 流式 INT8（199K）** | 同上 | 嗨 98.05%/你 98.05%，几乎无损 | 199K 对 cache 量化容忍度高 |
 
 > INT8 体积参考：量化日志示例 `793.1KB → 351.2KB`（TorchScript zip）。
 
@@ -69,12 +70,20 @@
 | `test_infer_stream_399_fix` | `…/399.pt` | 是 | 多 GPU | **96.75%** | **97.65%** | ✅ **推荐** Torch 流式对照 |
 | `test_infer_stream_399_tflite` | `…/399_stream_litert_fp32.tflite` | 是 | CPU | **96.75%** | **97.66%** | ✅ |
 | `test_infer_stream_399_tflite_int8` | `…/399_stream_litert_int8.tflite` | 是 | CPU | **91.39%** | **94.00%** | ✅ |
+| `test_infer_stream_399_tflite_native_int8_calib200` | `…/399_stream_native_int8_calib200.tflite` | 是 | CPU | **94.66%** | **97.06%** | ✅ |
 
-**常用命令有写、但本仓库暂无全量结果目录**
+**199K 实验目录**：`exp/fsmn_ctc_distill_mini_align_20_test2/`（checkpoint `229.pt`）。
+
+| 输出目录 | 模型路径（相对 `s0/`） | 流式 | 设备 | 嗨小问 acc | 你好问问 acc | `summary` |
+|----------|-------------------------|------|------|------------|--------------|-----------|
+| `test_infer_stream_229_tflite_int8` | `…/229_stream_litert_int8.tflite` | 是 | CPU | **98.05%** | **98.05%** | ✅ |
+
+> 199K LiteRT 流式 INT8 精度几乎无损失（对比 PyTorch INT8 229：嗨 97.82%/你 97.97%），与 S3 INT8 显著回退形成对比。推测 199K 模型参数量大（250 维 linear_dim）、数值分布更宽裕，对 cache 量化误差容忍度更高。
+
+**其他**（暂无全量结果目录）
 
 | 预期目录 | 模型路径 | 说明 |
 |----------|-----------|------|
-| `test_infer_stream_229_tflite_int8` | `exp/fsmn_ctc_distill_mini_align_20_test2/229_stream_litert_int8.tflite` | `--model distill199`，需自行跑完全量 |
 | `test_infer_399_litert_fp32` | `…/399_litert_fp32.tflite` | **整段静态** LiteRT，与 `399_stream_*` **不是**同一导出 |
 
 ### 2.2 LiteRT 流式 TFLite（S3）补充说明
@@ -83,6 +92,18 @@
 - **FP32**：`399_stream_litert_fp32.tflite`，元信息 `399_stream_litert_fp32.tflite.json`。
 - **INT8（PT2E）**：`399_stream_litert_int8.tflite`；`399_stream_litert_int8.tflite.json` 中可见 `quant_mode=int8_pt2e`、`calib_data=data/train/data.list`、`num_calib=200`、`seed=20260323`。
 - **结论**：FP32 流式与离线 **`test_399` 同量级**；INT8 流式相对 FP32 **显著回退**（cache 累积量化误差等），后续可加大校准、QAT 或混合精度。
+
+### 2.4 TFLite Native PTQ 流式（S3）补充说明
+
+- **pipeline**：PyTorch → ONNX (`torch.onnx.export`) → TFLite INT8 (`onnx2tf`)；脚本 `torch2lite/quantize_tflite_native.py`。
+- **INT8（200 calib）**：`399_stream_native_int8_calib200.tflite`（125KB，FP32 为 323KB）。
+- **量化模式**：权重 INT8，输入/输出保持 float32（cache 天然 FP32，避免 LiteRT PT2E 的 cache 量化误差累积）。
+- **结论**：Native PTQ 相比 LiteRT PT2E 明显改善（嗨 94.66% vs 91.39%，你 97.06% vs 94.00%），但仍未恢复到 FP32 水平（嗨差 2.1%，你差 0.6%）。待验证：增加校准数据量（1000 条）能否进一步缩小差距。
+
+### 2.3 LiteRT 流式 TFLite（199K）补充说明
+
+- **INT8（PT2E）**：`229_stream_litert_int8.tflite`；与 S3 相同导出脚本和校准配置（`num_calib=200`）。
+- **结论**：199K LiteRT 流式 INT8 **精度几乎无损**（嗨 98.05%/你 98.05%），远优于 S3 INT8（嗨 91.39%/你 94.00%）。推测原因：199K 的 `linear_dim=250`（vs S3 的 `linear_dim=250`）和 `proj_dim` 更大，特征空间更宽裕，对 cache 量化误差容忍度更高；或 199K 整体参数量更大（199K vs 74K），量化粒度影响较小。
 
 ### 2.3 复现与统计命令
 
@@ -183,7 +204,7 @@ python analyze_exp_test_stats.py --exp-dir "exp/fsmn_ctc_distill_s3_a48_p24_l3_m
 
 **对比结论**：从 `199.pt` + 固定 `1e-4` 未优于从头到 299；你好问问 FA 变差。**完整训练命令见 [附录 A](#附录-a)。**
 
-### 3.5 PTQ（199K，Torch）
+### 3.5 PTQ / ExecuTorch（199K）
 
 | 实验 | 关键词 | accuracy | frr | fa/h |
 |------|--------|---------:|-----|------|
@@ -191,7 +212,10 @@ python analyze_exp_test_stats.py --exp-dir "exp/fsmn_ctc_distill_s3_a48_p24_l3_m
 | test_229 | 嗨小问 | 98.13% | 1.87% | 0.98 |
 | test_229_int8 | 你好问问 | 97.97% | 2.03% | 0.45 |
 | test_229_int8 | 嗨小问 | 97.82% | 2.18% | 0.99 |
+| test_229_executorch_int8 | 你好问问 | 98.37% | 1.63% | 0.53 |
+| test_229_executorch_int8 | 嗨小问 | 98.32% | 1.68% | 0.99 |
 
+模型产物：Torch INT8 对应 `exp/fsmn_ctc_distill_mini_align_20_test2/229_int8.pt`（全量目录 `test_229_int8`）；ExecuTorch PT2E INT8 对应 `exp/fsmn_ctc_distill_mini_align_20_test2/229_executorch_int8.pte`（全量目录 `test_229_executorch_int8`）。
 另：INT16 模拟、ExecuTorch PT2E 多 backend（xnnpack / portable / hifi4）已打通，见常用命令 PTQ / ExecuTorch 段。
 
 ### 3.6 蒸馏 v3 merged（S1–S5，`test_399`）

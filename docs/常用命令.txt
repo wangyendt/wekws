@@ -211,3 +211,34 @@ bash ./evaluate.sh --checkpoint exp/fsmn_ctc_distill_s5_a32_p16_l3_merged/399.pt
 
 # v3 模型统计
 python analyze_exp_test_stats.py --test-id 399
+
+# ====================================================================
+# TFLite Native PTQ 实验（ONNX → onnx2tf）
+# ====================================================================
+# pipeline: PyTorch → ONNX (torch.onnx.export) → TFLite INT8 (onnx2tf)
+# 量化模式: 权重 INT8，输入/输出保持 float32（cache 天然 FP32，避免 LiteRT PT2E 的 cache 量化误差累积）
+# 依赖: pip install onnx onnxruntime onnx2tf
+
+# 仅导出 streaming step ONNX（调试用）
+python ./torch2lite/quantize_tflite_native.py --config exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/config.yaml --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --onnx_only --dump_meta
+
+# 实验 A: native PTQ INT8，200 条校准
+python ./torch2lite/quantize_tflite_native.py --config exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/config.yaml --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --num_calib 200 --calib_data data/train/data.list --dump_meta
+
+# 实验 B: native PTQ INT8，1000 条校准
+python ./torch2lite/quantize_tflite_native.py --config exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/config.yaml --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --num_calib 1000 --calib_data data/train/data.list --dump_meta
+
+# 对比 step 误差（替换 --tflite 为实际输出路径）
+python ./torch2lite/compare_streaming_torch_tflite.py --config exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/config.yaml --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --tflite exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_native_int8_calib200.tflite --num_steps 50
+
+# Smoke test
+python ./infer_wav_stream.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_native_int8_calib200.tflite --wav speech_charctc_kws_phone-xiaoyun/example/kws_xiaoyunxiaoyun.wav --disable_threshold
+
+# 全量评测（实验 A）
+python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_native_int8_calib200.tflite --test_data data/test/data.list --gpus -1 --progress_every 2000 --streaming --chunk_ms 1000 --result_test_id test_infer_stream_399_tflite_native_int8_calib200
+
+# 全量评测（实验 B）
+python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_native_int8_calib1000.tflite --test_data data/test/data.list --gpus -1 --progress_every 2000 --streaming --chunk_ms 1000 --result_test_id test_infer_stream_399_tflite_native_int8_calib1000
+
+# 查看结果（以实验 A 为例）
+python analyze_exp_test_stats.py --exp-dir "exp/fsmn_ctc_distill_s3_a48_p24_l3_merged" --test-id "test_infer_stream_399_tflite_native_int8_calib200"
