@@ -71,6 +71,7 @@ def parse_args():
     parser.add_argument("--streaming", action="store_true", help="按流式方式评测，每条 wav 按 chunk 模拟在线输入")
     parser.add_argument("--chunk_ms", type=float, default=1000.0, help="流式评测时每次送入的音频 chunk 时长，批量评测建议 1000~2000ms")
     parser.add_argument("--use_cpp_decoder", action="store_true", help="流式评测时使用 C++ pybind beam search / keyword detection")
+    parser.add_argument("--use_c_decoder", action="store_true", help="流式评测时使用 C 风格 pybind beam search / keyword detection")
     parser.add_argument("--indent", type=int, default=2, help="JSON 缩进空格数")
     return parser.parse_args()
 
@@ -285,11 +286,14 @@ def worker_eval(
         if args.streaming:
             shard_items = load_eval_items(shard_list_path, 0)
             lookahead_sec = iws.compute_streaming_lookahead_sec(configs)
-            decode_mode = (
-                "streaming_cpp_ctc_prefix_beam"
-                if args.use_cpp_decoder
-                else "streaming_python_ctc_prefix_beam"
-            )
+            if args.use_cpp_decoder and args.use_c_decoder:
+                raise ValueError("--use_cpp_decoder and --use_c_decoder are mutually exclusive")
+            if args.use_cpp_decoder:
+                decode_mode = "streaming_cpp_ctc_prefix_beam"
+            elif args.use_c_decoder:
+                decode_mode = "streaming_c_ctc_prefix_beam"
+            else:
+                decode_mode = "streaming_python_ctc_prefix_beam"
             for meta in shard_items:
                 key = meta["key"]
                 wav_path = iw.to_abs_path(meta["wav"])
@@ -309,6 +313,7 @@ def worker_eval(
                     interval_frames=50,
                     disable_threshold=False,
                     use_cpp_decoder=args.use_cpp_decoder,
+                    use_c_decoder=args.use_c_decoder,
                 )
                 waveform = iw.load_wav_and_resample(wav_path, streamer.sample_rate)
                 waveform = waveform.squeeze(0).numpy()
@@ -328,12 +333,13 @@ def worker_eval(
                 result["streaming_lookahead_sec"] = lookahead_sec
                 result["model_type"] = model_type
                 result["use_cpp_decoder"] = args.use_cpp_decoder
+                result["use_c_decoder"] = args.use_c_decoder
                 jsonl_fout.write(json.dumps(result, ensure_ascii=False) + "\n")
                 processed += 1
 
                 if args.progress_every > 0 and processed % args.progress_every == 0:
                     print(
-                        f"[worker {worker_id}] processed {processed}/{num_items} on gpu={gpu_id} streaming=1 cpp={int(args.use_cpp_decoder)}",
+                        f"[worker {worker_id}] processed {processed}/{num_items} on gpu={gpu_id} streaming=1 cpp={int(args.use_cpp_decoder)} c={int(args.use_c_decoder)}",
                         flush=True,
                     )
         else:

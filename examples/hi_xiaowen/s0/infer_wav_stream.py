@@ -12,6 +12,7 @@ import torch
 
 import infer_wav as iw
 from torch2lite import fbank_pybind
+from torch2lite.ctc_decoder_c_pybind import StreamingCTCDecoderC as CStyleStreamingCTCDecoder
 from torch2lite.ctc_decoder_pybind import StreamingCTCDecoder as CppStreamingCTCDecoder
 from torch2lite.tflite_quant_utils import dequantize_from_detail, quantize_to_detail
 
@@ -69,6 +70,7 @@ def parse_args():
     parser.add_argument("--interval_frames", type=int, default=50, help="两次连续触发的最小间隔帧数")
     parser.add_argument("--indent", type=int, default=2, help="JSON 输出缩进空格数")
     parser.add_argument("--use_cpp_decoder", action="store_true", help="使用 C++ pybind 后处理（beam search + keyword detection）")
+    parser.add_argument("--use_c_decoder", action="store_true", help="使用 C 风格 pybind 后处理（beam search + keyword detection）")
     return parser.parse_args()
 
 
@@ -156,6 +158,7 @@ class StreamingKeywordSpotter:
         interval_frames: int,
         disable_threshold: bool,
         use_cpp_decoder: bool = False,
+        use_c_decoder: bool = False,
     ):
         dataset_conf = configs["dataset_conf"]
         fbank_conf = dataset_conf["fbank_conf"]
@@ -232,17 +235,22 @@ class StreamingKeywordSpotter:
             "end_frame": None,
         }
 
+        if use_cpp_decoder and use_c_decoder:
+            raise ValueError("--use_cpp_decoder and --use_c_decoder are mutually exclusive")
         self.use_cpp_decoder = use_cpp_decoder
-        if use_cpp_decoder:
-            self._cpp_decoder = CppStreamingCTCDecoder(
+        self.use_c_decoder = use_c_decoder
+        self._native_decoder = None
+        if use_cpp_decoder or use_c_decoder:
+            decoder_cls = CppStreamingCTCDecoder if use_cpp_decoder else CStyleStreamingCTCDecoder
+            self._native_decoder = decoder_cls(
                 score_beam_size=score_beam_size,
                 path_beam_size=path_beam_size,
                 min_frames=min_frames,
                 max_frames=max_frames,
                 interval_frames=interval_frames,
             )
-            self._cpp_decoder.set_keywords(keywords_token, keywords_idxset)
-            self._cpp_decoder.set_thresholds(threshold_map)
+            self._native_decoder.set_keywords(keywords_token, keywords_idxset)
+            self._native_decoder.set_thresholds(threshold_map)
 
     def _update_best_decode(self, keyword, score, start_frame, end_frame):
         current = self.best_decode["candidate_score"]
@@ -399,10 +407,10 @@ class StreamingKeywordSpotter:
         }
 
     def _step_decoder(self, absolute_frame: int, prob: torch.Tensor) -> Optional[Dict[str, object]]:
-        if self.use_cpp_decoder:
-            self._cpp_decoder.advance_frame(absolute_frame, prob)
+        if self._native_decoder is not None:
+            self._native_decoder.advance_frame(absolute_frame, prob)
             return self._normalize_cpp_result(
-                self._cpp_decoder.execute_detection(self.disable_threshold)
+                self._native_decoder.execute_detection(self.disable_threshold)
             )
 
         self.cur_hyps = streaming_ctc_prefix_beam_search_step(
@@ -415,8 +423,8 @@ class StreamingKeywordSpotter:
         return self._execute_detection(absolute_frame)
 
     def _get_first_hyp_start_frame(self) -> int:
-        if self.use_cpp_decoder:
-            return self._cpp_decoder.get_first_hyp_start_frame()
+        if self._native_decoder is not None:
+            return self._native_decoder.get_first_hyp_start_frame()
         if self.cur_hyps and self.cur_hyps[0][0]:
             return int(self.cur_hyps[0][1][2][0]["frame"])
         return -1
@@ -453,14 +461,14 @@ class StreamingKeywordSpotter:
         return last_activation
 
     def reset_decode_state(self):
-        if self.use_cpp_decoder:
-            self._cpp_decoder.reset_beam_search()
+        if self._native_decoder is not None:
+            self._native_decoder.reset_beam_search()
             return
         self.cur_hyps = [(tuple(), (1.0, 0.0, []))]
 
     def get_best_decode_result(self) -> Dict[str, object]:
-        if self.use_cpp_decoder:
-            return self._cpp_decoder.get_best_decode_result()
+        if self._native_decoder is not None:
+            return self._native_decoder.get_best_decode_result()
         return dict(self.best_decode)
 
 
@@ -538,6 +546,7 @@ def main():
         interval_frames=args.interval_frames,
         disable_threshold=args.disable_threshold,
         use_cpp_decoder=args.use_cpp_decoder,
+        use_c_decoder=args.use_c_decoder,
     )
 
     waveform = iw.load_wav_and_resample(wav_path, streamer.sample_rate)
@@ -571,6 +580,7 @@ def main():
     result["streaming_lookahead_sec"] = compute_streaming_lookahead_sec(configs)
     result["model_type"] = model_type
     result["use_cpp_decoder"] = args.use_cpp_decoder
+    result["use_c_decoder"] = args.use_c_decoder
     print(json.dumps(result, ensure_ascii=False, indent=args.indent))
 
 

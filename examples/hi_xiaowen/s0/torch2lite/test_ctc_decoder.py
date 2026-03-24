@@ -19,7 +19,75 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import infer_wav_stream as iws
+from torch2lite.ctc_decoder_c_pybind import StreamingCTCDecoderC
 from torch2lite.ctc_decoder_pybind import StreamingCTCDecoder
+
+
+def assert_hypotheses_match(left_hyps, right_hyps, label: str):
+    assert len(left_hyps) == len(right_hyps), (
+        f"{label}: hypothesis count mismatch {len(left_hyps)} vs {len(right_hyps)}"
+    )
+    for hyp_index, (left, right) in enumerate(zip(left_hyps, right_hyps)):
+        assert list(left.prefix) == list(right.prefix), (
+            f"{label}: hyp {hyp_index} prefix mismatch {left.prefix} vs {right.prefix}"
+        )
+        assert math.isclose(left.pb, right.pb, abs_tol=1e-9), (
+            f"{label}: hyp {hyp_index} pb mismatch {left.pb} vs {right.pb}"
+        )
+        assert math.isclose(left.pnb, right.pnb, abs_tol=1e-9), (
+            f"{label}: hyp {hyp_index} pnb mismatch {left.pnb} vs {right.pnb}"
+        )
+        assert len(left.nodes) == len(right.nodes), (
+            f"{label}: hyp {hyp_index} node count mismatch {len(left.nodes)} vs {len(right.nodes)}"
+        )
+        for node_index, (left_node, right_node) in enumerate(zip(left.nodes, right.nodes)):
+            assert left_node.token == right_node.token, (
+                f"{label}: hyp {hyp_index} node {node_index} token mismatch {left_node.token} vs {right_node.token}"
+            )
+            assert left_node.frame == right_node.frame, (
+                f"{label}: hyp {hyp_index} node {node_index} frame mismatch {left_node.frame} vs {right_node.frame}"
+            )
+            assert math.isclose(left_node.prob, right_node.prob, abs_tol=1e-7), (
+                f"{label}: hyp {hyp_index} node {node_index} prob mismatch {left_node.prob} vs {right_node.prob}"
+            )
+
+
+def assert_detection_match(left_result, right_result, label: str):
+    assert (left_result is None) == (right_result is None), (
+        f"{label}: detection presence mismatch {left_result} vs {right_result}"
+    )
+    if left_result is None:
+        return
+    assert left_result["keyword"] == right_result["keyword"], (
+        f"{label}: keyword mismatch {left_result} vs {right_result}"
+    )
+    assert math.isclose(left_result["candidate_score"], right_result["candidate_score"], abs_tol=1e-9), (
+        f"{label}: score mismatch {left_result} vs {right_result}"
+    )
+    assert left_result["start_frame"] == right_result["start_frame"], (
+        f"{label}: start_frame mismatch {left_result} vs {right_result}"
+    )
+    assert left_result["end_frame"] == right_result["end_frame"], (
+        f"{label}: end_frame mismatch {left_result} vs {right_result}"
+    )
+
+
+def assert_best_decode_match(left_best, right_best, label: str):
+    assert left_best["candidate_keyword"] == right_best["candidate_keyword"], (
+        f"{label}: best keyword mismatch {left_best} vs {right_best}"
+    )
+    if left_best["candidate_score"] is None:
+        assert right_best["candidate_score"] is None, f"{label}: best score presence mismatch"
+        return
+    assert math.isclose(left_best["candidate_score"], right_best["candidate_score"], abs_tol=1e-9), (
+        f"{label}: best score mismatch {left_best} vs {right_best}"
+    )
+    assert left_best["start_frame"] == right_best["start_frame"], (
+        f"{label}: best start mismatch {left_best} vs {right_best}"
+    )
+    assert left_best["end_frame"] == right_best["end_frame"], (
+        f"{label}: best end mismatch {left_best} vs {right_best}"
+    )
 
 
 def is_sublist(main_list, check_list):
@@ -429,6 +497,87 @@ def test_empty_filter():
     print("  [PASS] test_empty_filter")
 
 
+def test_c_style_matches_cpp_multi_frame():
+    """Compare C-style decoder against current C++ decoder frame by frame."""
+    keywords_token = {
+        "嗨小问": {"token_id": (10, 15, 20)},
+        "你好问问": {"token_id": (5, 12, 5, 12)},
+    }
+    keywords_idxset = {0, 5, 10, 12, 15, 20}
+    decoder_cpp = StreamingCTCDecoder(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10)
+    decoder_c = StreamingCTCDecoderC(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10)
+    decoder_cpp.set_keywords(keywords_token, keywords_idxset)
+    decoder_c.set_keywords(keywords_token, keywords_idxset)
+
+    vocab_size = 50
+    torch.manual_seed(2026)
+    for frame_index in range(40):
+        probs = torch.softmax(torch.randn(vocab_size), dim=0)
+        if frame_index % 9 == 0:
+            probs[10] = 0.88
+            probs = probs / probs.sum()
+        decoder_cpp.advance_frame(frame_index, probs)
+        decoder_c.advance_frame(frame_index, probs)
+        assert_hypotheses_match(
+            decoder_cpp.get_hypotheses(),
+            decoder_c.get_hypotheses(),
+            f"frame {frame_index}",
+        )
+        assert_detection_match(
+            decoder_cpp.execute_detection(disable_threshold=True),
+            decoder_c.execute_detection(disable_threshold=True),
+            f"frame {frame_index} detection",
+        )
+
+    assert_best_decode_match(
+        decoder_cpp.get_best_decode_result(),
+        decoder_c.get_best_decode_result(),
+        "multi-frame best decode",
+    )
+    print("  [PASS] test_c_style_matches_cpp_multi_frame")
+
+
+def test_c_style_matches_cpp_reset_and_detection():
+    """Compare C-style decoder against current C++ decoder on trigger and reset semantics."""
+    keywords_token = {"嗨小问": {"token_id": (10, 15, 20)}}
+    keywords_idxset = {0, 10, 15, 20}
+    threshold_map = {"嗨小问": 0.1}
+
+    decoder_cpp = StreamingCTCDecoder(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10)
+    decoder_c = StreamingCTCDecoderC(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10)
+    decoder_cpp.set_keywords(keywords_token, keywords_idxset)
+    decoder_c.set_keywords(keywords_token, keywords_idxset)
+    decoder_cpp.set_thresholds(threshold_map)
+    decoder_c.set_thresholds(threshold_map)
+
+    vocab_size = 50
+
+    def make_probs(token_id: int) -> torch.Tensor:
+        probs = torch.full((vocab_size,), 1e-4, dtype=torch.float32)
+        probs[0] = 0.02
+        probs[token_id] = 0.9
+        return probs / probs.sum()
+
+    for frame_index, token_id in enumerate((10, 15, 20)):
+        probs = make_probs(token_id)
+        cpp_result = decoder_cpp.step_and_detect(frame_index, probs, disable_threshold=True)
+        c_result = decoder_c.step_and_detect(frame_index, probs, disable_threshold=True)
+        assert_detection_match(cpp_result, c_result, f"trigger frame {frame_index}")
+        assert_hypotheses_match(decoder_cpp.get_hypotheses(), decoder_c.get_hypotheses(), f"trigger frame {frame_index} hyps")
+
+    assert_best_decode_match(decoder_cpp.get_best_decode_result(), decoder_c.get_best_decode_result(), "best before reset")
+    decoder_cpp.reset_beam_search()
+    decoder_c.reset_beam_search()
+    assert_hypotheses_match(decoder_cpp.get_hypotheses(), decoder_c.get_hypotheses(), "after reset_beam_search")
+    assert_best_decode_match(decoder_cpp.get_best_decode_result(), decoder_c.get_best_decode_result(), "best after beam reset")
+
+    decoder_cpp.reset()
+    decoder_c.reset()
+    assert_hypotheses_match(decoder_cpp.get_hypotheses(), decoder_c.get_hypotheses(), "after full reset")
+    assert_best_decode_match(decoder_cpp.get_best_decode_result(), decoder_c.get_best_decode_result(), "best after full reset")
+    print("  [PASS] test_c_style_matches_cpp_reset_and_detection")
+
+
 def main():
     print("=" * 60)
     print("C++ CTC Decoder Comparison Tests")
@@ -443,6 +592,8 @@ def main():
         test_reset_beam_search_preserves_history,
         test_get_first_hyp_start_frame,
         test_empty_filter,
+        test_c_style_matches_cpp_multi_frame,
+        test_c_style_matches_cpp_reset_and_detection,
     ]
 
     passed = 0
