@@ -1,6 +1,6 @@
 # hi_xiaowen 实验记录
 
-> **维护说明**：基线内容截至 **2026-03-02**；**2026-03-23** 起增补 **LiteRT 流式 TFLite** 与 **`evaluate_infer_wav` 全量索引**。  
+> **维护说明**：基线内容截至 **2026-03-02**；**2026-03-23** 起增补 **LiteRT 流式 TFLite** 与 **`evaluate_infer_wav` 全量索引**；**2026-03-24** 起补充 **真流式 decoder（Python / C++ pybind）** 对齐结论，并澄清旧 `test_infer_stream_*` 的后处理口径。  
 > **路径约定**：未写绝对路径时，均相对仓库内 `examples/hi_xiaowen/s0/`。
 
 ---
@@ -27,6 +27,7 @@
 | **权重手术** | 756K → **392K** | test_79 约 **98%+** | 最稳的压缩手段 |
 | **知识蒸馏（199K）** | **~200K** | test_229 约 **98%** | 可行，训练与超参敏感 |
 | **蒸馏 v3 merged（S3）** | **~74K** | test_399 你 97.66% / 嗨 96.75% | 当前 **精度–参数** 较好折中 |
+| **S3 真流式后处理（Py / C++ / C）** | **~74K** | `test_infer_stream_399_{py,cpp,c}_post`：你 **97.51%** / 嗨 **96.44%** | **Python / C++ / C 风格 pybind 全量一致**；较旧流式口径略降 |
 | **INT8 PTQ（Torch/离线）** | 位数 ↓ | 229 → 229_int8 **轻微掉点** | 可接受 |
 | **LiteRT 流式 FP32（S3）** | TFLite step | 与离线 infer **同量级** | 导出链路对齐好 |
 | **LiteRT 流式 INT8（S3）** | 同上 | 相对 FP32 **明显回退** | 需继续优化 PTQ/校准等 |
@@ -67,8 +68,11 @@
 |----------|-------------------------|------|------|------------|--------------|-----------|
 | `test_infer_399` | `…/399.pt` | 否 | 多 GPU | **96.75%** | **97.66%** | ✅ |
 | `test_infer_stream_399` | `…/399.pt` | 是 | 多 GPU | **92.80%** | **96.94%** | ✅ 旧流式路径，弱于 fix |
-| `test_infer_stream_399_fix` | `…/399.pt` | 是 | 多 GPU | **96.75%** | **97.65%** | ✅ **推荐** Torch 流式对照 |
-| `test_infer_stream_399_tflite` | `…/399_stream_litert_fp32.tflite` | 是 | CPU | **96.75%** | **97.66%** | ✅ |
+| `test_infer_stream_399_fix` | `…/399.pt` | 是 | 多 GPU | **96.75%** | **97.65%** | ✅ **旧口径**：流式前端 + `offline_ctc_prefix_beam` |
+| `test_infer_stream_399_py_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_python_ctc_prefix_beam` |
+| `test_infer_stream_399_cpp_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_cpp_ctc_prefix_beam`，与 Python 全量一致 |
+| `test_infer_stream_399_c_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_c_ctc_prefix_beam`，与 Python / C++ 全量一致 |
+| `test_infer_stream_399_tflite` | `…/399_stream_litert_fp32.tflite` | 是 | CPU | **96.75%** | **97.66%** | ✅ **旧口径**：流式前端 + `offline_ctc_prefix_beam` |
 | `test_infer_stream_399_tflite_int8` | `…/399_stream_litert_int8.tflite` | 是 | CPU | **91.39%** | **94.00%** | ✅ |
 | `test_infer_stream_399_tflite_native_int8_calib200` | `…/399_stream_native_int8_calib200.tflite` | 是 | CPU | **94.66%** | **97.06%** | ✅ |
 
@@ -79,6 +83,22 @@
 | `test_infer_stream_229_tflite_int8` | `…/229_stream_litert_int8.tflite` | 是 | CPU | **98.05%** | **98.05%** | ✅ |
 
 > 199K LiteRT 流式 INT8 精度几乎无损失（对比 PyTorch INT8 229：嗨 97.82%/你 97.97%），与 S3 INT8 显著回退形成对比。推测 199K 模型参数量大（250 维 linear_dim）、数值分布更宽裕，对 cache 量化误差容忍度更高。
+
+**2026-03-24 口径澄清（S3 流式后处理）**
+
+- `test_infer_stream_399_fix` 与 `test_infer_stream_399_tflite` 生成于 **2026-03-24 16:29** 这次 streaming decoder 改造提交（`045d6c0 Add streaming C++ CTC decoder and docs`）之前，`results.jsonl` 里记录的 `decode_mode` 都是 **`offline_ctc_prefix_beam`**。
+- 旧逻辑是：先用 `collect_streaming_probs(...)` 把流式前向得到的整段概率拼起来，再调用 `infer_wav.py:decode_keyword_hit_with_token_info(...)` 做**离线** prefix beam 搜索。它验证的是 **streaming 前端 / Torch 与 TFLite 前向对齐**，不是“真流式后处理”。
+- 新逻辑是：`evaluate_infer_wav.py --streaming` 调 `collect_streaming_best_decode(...)`，逐帧走 `StreamingKeywordSpotter._step_decoder(...)`。对应目录：
+  - `test_infer_stream_399_py_post` -> `streaming_python_ctc_prefix_beam`
+  - `test_infer_stream_399_cpp_post` -> `streaming_cpp_ctc_prefix_beam`
+  - `test_infer_stream_399_c_post` -> `streaming_c_ctc_prefix_beam`
+- 这三个新目录的 `score.txt` 按 `key` 对齐后 **0 差异**，说明当前 **Python / C++ / C 风格 pybind 真流式 decoder 全量一致**；本次掉点不是 native decoder 实现引入的。
+- 它们相对旧 `fix/tflite float` 略低，核心原因是**评测语义变了**：真流式路径会额外施加 `min_frames=5`、`max_frames=250`、`interval_frames=50` 等在线约束，而旧离线后处理只看整段 prefix beam 最优路径，不施加这些约束。
+- 一个代表性样本：`你 好 问 问` 在旧口径下会命中，`start=0.03s, end=4.17s, score≈0.784`；真流式路径拒绝。这个跨度约 **4.14s**，已明显超过 `max_frames=250`（约 **2.5s**）的在线约束。
+- 全量对比里，旧 `fix` 命中但新真流式拒绝的样本有 **19** 条，其中 **12** 条跨度超过 **2.5s**；另有少量样本发生关键词重分配（如旧 `你好问问` -> 新 `嗨小问`），说明在线 beam 剪枝与时序约束共同改变了最终候选。
+- 因此：
+  - 若要证明 **Torch 与 TFLite streaming 前向** 一致，旧 `test_infer_stream_399_fix / tflite` 仍有参考价值。
+  - 若要评估 **真实在线后处理精度**，应以 `test_infer_stream_399_py_post / cpp_post / c_post` 为准。
 
 **其他**（暂无全量结果目录）
 
@@ -91,7 +111,10 @@
 - **导出**：`torch2lite/export_streaming_litert_tflite.py`；step 输入 **`1×1×400` + cache**（与端侧 chunk 一致）。
 - **FP32**：`399_stream_litert_fp32.tflite`，元信息 `399_stream_litert_fp32.tflite.json`。
 - **INT8（PT2E）**：`399_stream_litert_int8.tflite`；`399_stream_litert_int8.tflite.json` 中可见 `quant_mode=int8_pt2e`、`calib_data=data/train/data.list`、`num_calib=200`、`seed=20260323`。
-- **结论**：FP32 流式与离线 **`test_399` 同量级**；INT8 流式相对 FP32 **显著回退**（cache 累积量化误差等），后续可加大校准、QAT 或混合精度。
+- **结论**：
+  - 旧目录 `test_infer_stream_399_tflite` 在 **`offline_ctc_prefix_beam`** 口径下与离线 **`test_399` 同量级**，说明导出后的 **streaming 前向** 基本对齐。
+  - 但它**不能直接代表真流式后处理精度**；若要和 `test_infer_stream_399_py_post / cpp_post / c_post` apples-to-apples 对比，需要用当前脚本重新跑一遍 TFLite FP32 真流式后处理。
+  - INT8 流式相对 FP32 **显著回退**（cache 累积量化误差等），后续可加大校准、QAT 或混合精度。
 
 ### 2.4 TFLite Native PTQ 流式（S3）补充说明
 
@@ -114,11 +137,27 @@ cd examples/hi_xiaowen/s0
 python ./evaluate_infer_wav.py --model s3 --test_data data/test/data.list \
   --gpus 0,1,2,3 --progress_every 2000
 
-# 流式 Torch（推荐目录名）
+# 流式 Torch（旧口径，streaming 前端 + offline 后处理）
 python ./evaluate_infer_wav.py --model s3 \
   --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt \
   --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 \
   --streaming --chunk_ms 1000 --result_test_id test_infer_stream_399_fix
+
+# 真流式后处理（Python / C++ / C 风格 pybind，对比应看这三组）
+python ./evaluate_infer_wav.py --model s3 \
+  --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt \
+  --test_data data/test/data.list --gpus -1 --progress_every 2000 \
+  --streaming --chunk_ms 1000 --result_test_id test_infer_stream_399_py_post
+
+python ./evaluate_infer_wav.py --model s3 \
+  --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt \
+  --test_data data/test/data.list --gpus -1 --progress_every 2000 \
+  --streaming --chunk_ms 1000 --use_cpp_decoder --result_test_id test_infer_stream_399_cpp_post
+
+python ./evaluate_infer_wav.py --model s3 \
+  --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt \
+  --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 \
+  --streaming --chunk_ms 1000 --use_c_decoder --result_test_id test_infer_stream_399_c_post
 
 # 流式 TFLite FP32 / INT8
 python ./evaluate_infer_wav.py --model s3 \
