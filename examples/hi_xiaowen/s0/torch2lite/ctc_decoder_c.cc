@@ -250,6 +250,14 @@ static int32_t ctc_decoder_c_float_close_zero(double value) {
     return fabs(value) < 1.0e-6;
 }
 
+static CTCDecoderCNodeFrame ctc_decoder_c_wrap_frame(int32_t frame) {
+    return (CTCDecoderCNodeFrame)((uint32_t)frame & (uint32_t)UINT16_MAX);
+}
+
+static int32_t ctc_decoder_c_frame_diff(CTCDecoderCNodeFrame newer, CTCDecoderCNodeFrame older) {
+    return (int32_t)(CTCDecoderCNodeFrame)(newer - older);
+}
+
 static int32_t ctc_decoder_c_select_topk(
     CTCDecoderCState* state,
     const float* probs,
@@ -367,9 +375,12 @@ static int32_t ctc_decoder_c_alloc_node(
     if (state->node_pool_size >= state->node_pool_capacity) {
         return -1;
     }
+    if (token < 0 || token > (int32_t)UINT16_MAX) {
+        return -1;
+    }
     ref = state->node_pool_size++;
-    state->node_pool[ref].token = token;
-    state->node_pool[ref].frame = frame;
+    state->node_pool[ref].token = (CTCDecoderCTokenId)token;
+    state->node_pool[ref].frame = ctc_decoder_c_wrap_frame(frame);
     state->node_pool[ref].prob = prob;
     return ref;
 }
@@ -483,7 +494,7 @@ int32_t ctc_decoder_c_init_with_allocator(
     if (config->score_beam_size <= 0 || config->path_beam_size <= 0 || config->frame_step <= 0) {
         return -1;
     }
-    if (config->max_prefix_len > CTC_DECODER_C_INVALID_NODE_REF) {
+    if (config->max_prefix_len > CTC_DECODER_C_INVALID_NODE_REF || config->max_frames >= (int32_t)UINT16_MAX || config->interval_frames >= (int32_t)UINT16_MAX) {
         return -1;
     }
 
@@ -739,7 +750,7 @@ int32_t ctc_decoder_c_advance_frame(
                         }
                         if (token_prob > state->node_pool[ref].prob) {
                             state->node_pool[ref].prob = token_prob;
-                            state->node_pool[ref].frame = frame_index;
+                            state->node_pool[ref].frame = ctc_decoder_c_wrap_frame(frame_index);
                         }
                     }
                 }
@@ -850,13 +861,13 @@ CTCDecoderCDetectionResult ctc_decoder_c_execute_detection(CTCDecoderCState* sta
             if (offset + keyword->token_count > hyp->node_count) {
                 return result;
             }
-            start_frame = state->node_pool[(int32_t)hyp->node_refs[offset]].frame;
-            end_frame = state->node_pool[(int32_t)hyp->node_refs[offset + keyword->token_count - 1]].frame;
+            start_frame = (int32_t)state->node_pool[(int32_t)hyp->node_refs[offset]].frame;
+            end_frame = (int32_t)state->node_pool[(int32_t)hyp->node_refs[offset + keyword->token_count - 1]].frame;
             for (node_index = offset; node_index < offset + keyword->token_count; ++node_index) {
                 score *= (double)state->node_pool[(int32_t)hyp->node_refs[node_index]].prob;
             }
             score = sqrt(score);
-            duration = end_frame - start_frame;
+            duration = ctc_decoder_c_frame_diff((CTCDecoderCNodeFrame)end_frame, (CTCDecoderCNodeFrame)start_frame);
 #if CTC_DECODER_C_ENABLE_EXTENDED_API
             if (!state->has_best_decode || score > state->best_score) {
                 state->best_word_index = keyword->word_index;
@@ -869,7 +880,7 @@ CTCDecoderCDetectionResult ctc_decoder_c_execute_detection(CTCDecoderCState* sta
             if (!passed_threshold && keyword->word_index >= 0 && keyword->word_index < state->num_keywords && state->threshold_valid[keyword->word_index] && score >= (double)state->thresholds[keyword->word_index]) {
                 passed_threshold = 1;
             }
-            enough_interval = (state->last_active_pos == -1) || (end_frame - state->last_active_pos >= state->config.interval_frames);
+            enough_interval = (state->last_active_pos == -1) || (ctc_decoder_c_frame_diff((CTCDecoderCNodeFrame)end_frame, (CTCDecoderCNodeFrame)state->last_active_pos) >= state->config.interval_frames);
             if (keyword_index < state->num_keywords && state->keyword_strings) {
                 keyword_string = state->keyword_strings[keyword_index];
             }
@@ -904,7 +915,7 @@ static int32_t ctc_decoder_c_peek_first_hyp_start_frame(const CTCDecoderCState* 
     if (!state || state->cur_hyp_count <= 0 || state->cur_hyps[0].node_count <= 0) {
         return -1;
     }
-    return state->node_pool[(int32_t)state->cur_hyps[0].node_refs[0]].frame;
+    return (int32_t)state->node_pool[(int32_t)state->cur_hyps[0].node_refs[0]].frame;
 }
 
 static void ctc_decoder_c_maybe_reset_stale_beam(
@@ -915,7 +926,7 @@ static void ctc_decoder_c_maybe_reset_stale_beam(
         return;
     }
     start_frame = ctc_decoder_c_peek_first_hyp_start_frame(state);
-    if (start_frame >= 0 && (next_frame_index - start_frame) > state->config.max_frames) {
+    if (start_frame >= 0 && ctc_decoder_c_frame_diff(ctc_decoder_c_wrap_frame(next_frame_index), (CTCDecoderCNodeFrame)start_frame) > state->config.max_frames) {
         ctc_decoder_c_reset_beam_search(state);
     }
 }

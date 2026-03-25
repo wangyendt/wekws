@@ -19,14 +19,16 @@ extern "C" {
 
 typedef uint16_t CTCDecoderCPrefixToken;
 typedef uint16_t CTCDecoderCNodeRef;
+typedef uint16_t CTCDecoderCTokenId;
+typedef uint16_t CTCDecoderCNodeFrame;
 
 #ifndef CTC_DECODER_C_INVALID_NODE_REF
 #define CTC_DECODER_C_INVALID_NODE_REF UINT16_MAX
 #endif
 
 typedef struct {
-    int32_t token;
-    int32_t frame;
+    CTCDecoderCTokenId token;
+    CTCDecoderCNodeFrame frame;
     float prob;
 } CTCDecoderCTokenNode;
 

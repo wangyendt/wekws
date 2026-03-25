@@ -1,3 +1,6 @@
+import hashlib
+import os
+import shlex
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -13,19 +16,24 @@ def _load_extension():
         return _EXTENSION
 
     base_dir = Path(__file__).resolve().parent
-    build_dir = base_dir / ".ctc_decoder_c_pybind_build"
+    extra_cflags = [
+        "-O3",
+        "-std=c++17",
+    ]
+    env_extra = os.environ.get("HI_XIAOWEN_CTC_DECODER_C_EXTRA_CFLAGS", "").strip()
+    if env_extra:
+        extra_cflags.extend(shlex.split(env_extra))
+    flag_hash = hashlib.sha1("\0".join(extra_cflags).encode("utf-8")).hexdigest()[:10]
+    build_dir = base_dir / ".ctc_decoder_c_pybind_build" / flag_hash
     build_dir.mkdir(parents=True, exist_ok=True)
 
     _EXTENSION = load(
-        name="hi_xiaowen_ctc_decoder_c_ext",
+        name=f"hi_xiaowen_ctc_decoder_c_ext_{flag_hash}",
         sources=[
             str(base_dir / "ctc_decoder_c_pybind.cc"),
             str(base_dir / "ctc_decoder_c.cc"),
         ],
-        extra_cflags=[
-            "-O3",
-            "-std=c++17",
-        ],
+        extra_cflags=extra_cflags,
         with_cuda=False,
         build_directory=str(build_dir),
         verbose=False,
