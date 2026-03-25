@@ -149,6 +149,8 @@ python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a
 python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 --streaming --chunk_ms 1000 --use_cpp_decoder --result_test_id test_infer_stream_399_cpp_post
 # 对比 Python 后处理与 C 风格后处理是否全量一致（C-style beam search / keyword detection）。
 python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 --streaming --chunk_ms 1000 --use_c_decoder --result_test_id test_infer_stream_399_c_post
+# 对比旧版 C 风格后处理与当前 lazy-node 压缩版是否全量一致。
+python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 --streaming --chunk_ms 1000 --use_c_decoder --result_test_id test_infer_stream_399_c_post_lazy_nodes
 # 单条 wav 的流式 Torch smoke test，确认在线推理输出是否正常。
 python ./infer_wav_stream.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --wav speech_charctc_kws_phone-xiaoyun/example/kws_xiaoyunxiaoyun.wav --disable_threshold
 

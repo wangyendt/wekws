@@ -1,6 +1,6 @@
 # hi_xiaowen 实验记录
 
-> **维护说明**：基线内容截至 **2026-03-02**；**2026-03-23** 起增补 **LiteRT 流式 TFLite** 与 **`evaluate_infer_wav` 全量索引**；**2026-03-24** 起补充 **真流式 decoder（Python / C++ pybind）** 对齐结论，并澄清旧 `test_infer_stream_*` 的后处理口径。  
+> **维护说明**：基线内容截至 **2026-03-02**；**2026-03-23** 起增补 **LiteRT 流式 TFLite** 与 **`evaluate_infer_wav` 全量索引**；**2026-03-24** 起补充 **真流式 decoder（Python / C++ pybind）** 对齐结论，并澄清旧 `test_infer_stream_*` 的后处理口径；**2026-03-25** 起补充 **C decoder lazy-node 内存压缩** 的全量回归，确认当前实现无精度回退。  
 > **路径约定**：未写绝对路径时，均相对仓库内 `examples/hi_xiaowen/s0/`。
 
 ---
@@ -27,7 +27,7 @@
 | **权重手术** | 756K → **392K** | test_79 约 **98%+** | 最稳的压缩手段 |
 | **知识蒸馏（199K）** | **~200K** | test_229 约 **98%** | 可行，训练与超参敏感 |
 | **蒸馏 v3 merged（S3）** | **~74K** | test_399 你 97.66% / 嗨 96.75% | 当前 **精度–参数** 较好折中 |
-| **S3 真流式后处理（Py / C++ / C）** | **~74K** | `test_infer_stream_399_{py,cpp,c}_post`：你 **97.51%** / 嗨 **96.44%** | **Python / C++ / C 风格 pybind 全量一致**；较旧流式口径略降 |
+| **S3 真流式后处理（Py / C++ / C / lazy-node C）** | **~74K** | `test_infer_stream_399_{py,cpp,c}_post` 与 `test_infer_stream_399_c_post_lazy_nodes`：你 **97.51%** / 嗨 **96.44%** | **Python / C++ / C 风格 pybind 全量一致**；`lazy-node` 压缩版与旧 `c_post` 全量一致，较旧流式口径略降 |
 | **INT8 PTQ（Torch/离线）** | 位数 ↓ | 229 → 229_int8 **轻微掉点** | 可接受 |
 | **LiteRT 流式 FP32（S3）** | TFLite step | 与离线 infer **同量级** | 导出链路对齐好 |
 | **LiteRT 流式 INT8（S3）** | 同上 | 相对 FP32 **明显回退** | 需继续优化 PTQ/校准等 |
@@ -72,6 +72,7 @@
 | `test_infer_stream_399_py_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_python_ctc_prefix_beam` |
 | `test_infer_stream_399_cpp_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_cpp_ctc_prefix_beam`，与 Python 全量一致 |
 | `test_infer_stream_399_c_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_c_ctc_prefix_beam`，与 Python / C++ 全量一致 |
+| `test_infer_stream_399_c_post_lazy_nodes` | `…/399.pt` | 是 | 多 GPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_c_ctc_prefix_beam` 的 lazy-node 内存压缩版；与旧 `c_post` 全量一致 |
 | `test_infer_stream_399_tflite` | `…/399_stream_litert_fp32.tflite` | 是 | CPU | **96.75%** | **97.66%** | ✅ **旧口径**：流式前端 + `offline_ctc_prefix_beam` |
 | `test_infer_stream_399_tflite_int8` | `…/399_stream_litert_int8.tflite` | 是 | CPU | **91.39%** | **94.00%** | ✅ |
 | `test_infer_stream_399_tflite_native_int8_calib200` | `…/399_stream_native_int8_calib200.tflite` | 是 | CPU | **94.66%** | **97.06%** | ✅ |
@@ -99,6 +100,13 @@
 - 因此：
   - 若要证明 **Torch 与 TFLite streaming 前向** 一致，旧 `test_infer_stream_399_fix / tflite` 仍有参考价值。
   - 若要评估 **真实在线后处理精度**，应以 `test_infer_stream_399_py_post / cpp_post / c_post` 为准。
+
+**2026-03-25：C decoder lazy-node 内存压缩全量回归**
+
+- 新目录：`test_infer_stream_399_c_post_lazy_nodes`。命令与旧 `test_infer_stream_399_c_post` 唯一关键差异是底层 C decoder 改成了 lazy-node 物化版本。
+- 全量 `summary.json` 与旧 `test_infer_stream_399_c_post` **完全一致**：嗨小问 `threshold=0.296, accuracy=96.44%, frr=3.56%, fa/h=0.99`；你好问问 `threshold=0.016, accuracy=97.51%, frr=2.49%, fa/h=0.50`。
+- 更强证据：两次全量评测的 `results.jsonl` 的 `sha256` 都是 `08483e0ee587ed86b422afd03b9e038d982e226ff93becd964a6b4fe483df298`，`score.txt` 的 `sha256` 都是 `e996ba54843e0d4fec0251f13f9e14e1c446cbb063acfc146a474579c3c29a42`。
+- 结论：截至 **2026-03-25**，这轮 lazy-node 内存压缩在 **73459** 条全量测试上没有观测到任何输出变化；当前证据支持它对现有 S3 真流式 C decoder 路径 **无精度回退**。
 
 **其他**（暂无全量结果目录）
 

@@ -103,29 +103,47 @@ static void ctc_decoder_c_bind_hypothesis_storage(
     int32_t index;
     for (index = 0; index < hyp_count; ++index) {
         hyps[index].prefix = prefix_storage + ((ptrdiff_t)index * max_prefix_len);
-        hyps[index].nodes = node_storage + ((ptrdiff_t)index * max_prefix_len);
+        hyps[index].nodes = node_storage ? (node_storage + ((ptrdiff_t)index * max_prefix_len)) : NULL;
         hyps[index].node_refs = node_ref_storage + ((ptrdiff_t)index * max_prefix_len);
         ctc_decoder_c_reset_hypothesis(&hyps[index]);
     }
 }
 
-static void ctc_decoder_c_materialize_hypothesis(
-    const CTCDecoderCState* state,
+static int32_t ctc_decoder_c_ensure_current_node_storage(CTCDecoderCState* state) {
+    int32_t index;
+    ptrdiff_t node_slots;
+    if (state->cur_node_storage) {
+        return 0;
+    }
+    node_slots = (ptrdiff_t)state->cur_hyp_capacity * state->config.max_prefix_len;
+    state->cur_node_storage = (CTCDecoderCTokenNode*)ctc_decoder_c_alloc_zeroed(
+        &state->allocator,
+        (size_t)node_slots,
+        sizeof(CTCDecoderCTokenNode));
+    if (!state->cur_node_storage) {
+        return -1;
+    }
+    for (index = 0; index < state->cur_hyp_capacity; ++index) {
+        state->cur_hyps[index].nodes =
+            state->cur_node_storage + ((ptrdiff_t)index * state->config.max_prefix_len);
+    }
+    return 0;
+}
+
+static int32_t ctc_decoder_c_materialize_hypothesis(
+    CTCDecoderCState* state,
     CTCDecoderCHypothesis* hyp) {
     int32_t index;
+    if (ctc_decoder_c_ensure_current_node_storage(state) != 0) {
+        return -1;
+    }
     for (index = 0; index < hyp->node_count; ++index) {
         int32_t ref = hyp->node_refs[index];
         if (ref >= 0 && ref < state->node_pool_size) {
             hyp->nodes[index] = state->node_pool[ref];
         }
     }
-}
-
-static void ctc_decoder_c_materialize_current_hypotheses(CTCDecoderCState* state) {
-    int32_t index;
-    for (index = 0; index < state->cur_hyp_count; ++index) {
-        ctc_decoder_c_materialize_hypothesis(state, &state->cur_hyps[index]);
-    }
+    return 0;
 }
 
 static void ctc_decoder_c_init_beam_state(CTCDecoderCState* state) {
@@ -344,6 +362,7 @@ static int32_t ctc_decoder_c_compact_node_pool(CTCDecoderCState* state) {
     int32_t index;
     int32_t hyp_index;
     int32_t node_index;
+    int32_t target_index;
     int32_t new_size = 0;
     for (index = 0; index < state->node_pool_size; ++index) {
         state->node_ref_remap[index] = -1;
@@ -361,7 +380,6 @@ static int32_t ctc_decoder_c_compact_node_pool(CTCDecoderCState* state) {
                 if (new_size >= state->node_pool_capacity) {
                     return -1;
                 }
-                state->node_pool_tmp[new_size] = state->node_pool[old_ref];
                 state->node_ref_remap[old_ref] = new_size;
                 new_ref = new_size;
                 ++new_size;
@@ -369,11 +387,26 @@ static int32_t ctc_decoder_c_compact_node_pool(CTCDecoderCState* state) {
             hyp->node_refs[node_index] = new_ref;
         }
     }
-    if (new_size > 0) {
-        memcpy(state->node_pool, state->node_pool_tmp, (size_t)new_size * sizeof(CTCDecoderCTokenNode));
+    for (target_index = 0; target_index < new_size; ++target_index) {
+        if (state->node_ref_remap[target_index] == target_index) {
+            continue;
+        }
+        for (index = target_index + 1; index < state->node_pool_size; ++index) {
+            if (state->node_ref_remap[index] == target_index) {
+                int32_t displaced_target = state->node_ref_remap[target_index];
+                CTCDecoderCTokenNode tmp = state->node_pool[target_index];
+                state->node_pool[target_index] = state->node_pool[index];
+                state->node_pool[index] = tmp;
+                state->node_ref_remap[target_index] = target_index;
+                state->node_ref_remap[index] = displaced_target;
+                break;
+            }
+        }
+        if (index >= state->node_pool_size) {
+            return -1;
+        }
     }
     state->node_pool_size = new_size;
-    ctc_decoder_c_materialize_current_hypotheses(state);
     return 0;
 }
 
@@ -456,8 +489,6 @@ int32_t ctc_decoder_c_init_with_allocator(
     state->next_hyps = (CTCDecoderCHypothesis*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)state->next_hyp_capacity, sizeof(CTCDecoderCHypothesis));
     state->cur_prefix_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_cur, sizeof(int32_t));
     state->next_prefix_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_next, sizeof(int32_t));
-    state->cur_node_storage = (CTCDecoderCTokenNode*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_cur, sizeof(CTCDecoderCTokenNode));
-    state->next_node_storage = (CTCDecoderCTokenNode*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_next, sizeof(CTCDecoderCTokenNode));
     state->cur_node_ref_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_cur, sizeof(int32_t));
     state->next_node_ref_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_next, sizeof(int32_t));
     state->topk_capacity = state->config.score_beam_size;
@@ -465,36 +496,28 @@ int32_t ctc_decoder_c_init_with_allocator(
     state->topk_indices = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)state->topk_capacity, sizeof(int32_t));
     state->temp_prefix = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)max_prefix_len, sizeof(int32_t));
     state->node_pool = (CTCDecoderCTokenNode*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)state->node_pool_capacity, sizeof(CTCDecoderCTokenNode));
-
-    /* Reuse next-frame materialization scratch during compaction. */
-    state->node_pool_tmp = state->next_node_storage;
     state->node_ref_remap = state->next_node_ref_storage;
 
     if (!state->cur_hyps || !state->next_hyps || !state->cur_prefix_storage || !state->next_prefix_storage ||
-        !state->cur_node_storage || !state->next_node_storage || !state->cur_node_ref_storage ||
-        !state->next_node_ref_storage || !state->topk_probs || !state->topk_indices || !state->temp_prefix ||
-        !state->node_pool) {
+        !state->cur_node_ref_storage || !state->next_node_ref_storage || !state->topk_probs ||
+        !state->topk_indices || !state->temp_prefix || !state->node_pool) {
         ctc_decoder_c_free(state);
         return -1;
     }
 
-    ctc_decoder_c_bind_hypothesis_storage(state->cur_hyps, state->cur_hyp_capacity, state->cur_prefix_storage, state->cur_node_storage, state->cur_node_ref_storage, max_prefix_len);
-    ctc_decoder_c_bind_hypothesis_storage(state->next_hyps, state->next_hyp_capacity, state->next_prefix_storage, state->next_node_storage, state->next_node_ref_storage, max_prefix_len);
+    ctc_decoder_c_bind_hypothesis_storage(state->cur_hyps, state->cur_hyp_capacity, state->cur_prefix_storage, NULL, state->cur_node_ref_storage, max_prefix_len);
+    ctc_decoder_c_bind_hypothesis_storage(state->next_hyps, state->next_hyp_capacity, state->next_prefix_storage, NULL, state->next_node_ref_storage, max_prefix_len);
     ctc_decoder_c_init_beam_state(state);
     return 0;
 }
 
 void ctc_decoder_c_free(CTCDecoderCState* state) {
-    int32_t reuse_next_node_storage;
-    int32_t reuse_next_node_ref_storage;
     CTCDecoderCAllocator allocator;
     if (!state) {
         return;
     }
 
     ctc_decoder_c_resolve_allocator(&state->allocator, &allocator);
-    reuse_next_node_storage = state->node_pool_tmp == state->next_node_storage;
-    reuse_next_node_ref_storage = state->node_ref_remap == state->next_node_ref_storage;
 
     ctc_decoder_c_release_bytes(&allocator, state->cur_hyps);
     ctc_decoder_c_release_bytes(&allocator, state->next_hyps);
@@ -506,13 +529,6 @@ void ctc_decoder_c_free(CTCDecoderCState* state) {
     ctc_decoder_c_release_bytes(&allocator, state->topk_indices);
     ctc_decoder_c_release_bytes(&allocator, state->temp_prefix);
     ctc_decoder_c_release_bytes(&allocator, state->node_pool);
-    if (!reuse_next_node_storage) {
-        ctc_decoder_c_release_bytes(&allocator, state->node_pool_tmp);
-    }
-    if (!reuse_next_node_ref_storage) {
-        ctc_decoder_c_release_bytes(&allocator, state->node_ref_remap);
-    }
-    ctc_decoder_c_release_bytes(&allocator, state->next_node_storage);
     ctc_decoder_c_release_bytes(&allocator, state->next_node_ref_storage);
     ctc_decoder_c_release_bytes(&allocator, state->keywords);
     ctc_decoder_c_release_bytes(&allocator, state->keyword_token_storage);
@@ -914,6 +930,8 @@ const CTCDecoderCHypothesis* ctc_decoder_c_get_hypothesis(const CTCDecoderCState
     if (!state || index < 0 || index >= state->cur_hyp_count) {
         return NULL;
     }
-    ctc_decoder_c_materialize_hypothesis((CTCDecoderCState*)state, &((CTCDecoderCState*)state)->cur_hyps[index]);
+    if (ctc_decoder_c_materialize_hypothesis((CTCDecoderCState*)state, &((CTCDecoderCState*)state)->cur_hyps[index]) != 0) {
+        return NULL;
+    }
     return &state->cur_hyps[index];
 }
