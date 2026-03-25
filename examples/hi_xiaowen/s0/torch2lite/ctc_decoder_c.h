@@ -1,6 +1,7 @@
 #ifndef CTC_DECODER_C_H_
 #define CTC_DECODER_C_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -49,8 +50,20 @@ typedef struct {
 
 typedef CTCDecoderCDetectionResult CTCDecoderCBestDecodeResult;
 
+typedef void* (*CTCDecoderCMallocFn)(void* user_data, size_t size);
+typedef void* (*CTCDecoderCCallocFn)(void* user_data, size_t count, size_t size);
+typedef void (*CTCDecoderCFreeFn)(void* user_data, void* ptr);
+
+typedef struct {
+    CTCDecoderCMallocFn malloc_fn;
+    CTCDecoderCCallocFn calloc_fn;
+    CTCDecoderCFreeFn free_fn;
+    void* user_data;
+} CTCDecoderCAllocator;
+
 typedef struct {
     CTCDecoderCConfig config;
+    CTCDecoderCAllocator allocator;
 
     CTCDecoderCHypothesis* cur_hyps;
     CTCDecoderCHypothesis* next_hyps;
@@ -99,7 +112,12 @@ typedef struct {
 } CTCDecoderCState;
 
 void ctc_decoder_c_init_default_config(CTCDecoderCConfig* config);
+void ctc_decoder_c_init_default_allocator(CTCDecoderCAllocator* allocator);
 int32_t ctc_decoder_c_init(CTCDecoderCState* state, const CTCDecoderCConfig* config);
+int32_t ctc_decoder_c_init_with_allocator(
+    CTCDecoderCState* state,
+    const CTCDecoderCConfig* config,
+    const CTCDecoderCAllocator* allocator);
 void ctc_decoder_c_free(CTCDecoderCState* state);
 
 int32_t ctc_decoder_c_set_keywords(

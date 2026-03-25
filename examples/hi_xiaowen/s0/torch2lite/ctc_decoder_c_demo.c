@@ -14,6 +14,7 @@
  *   min_frames     = 5
  *   max_frames     = 250
  *   interval       = 50
+ *   max_prefix_len = 64
  *
  * Important:
  *   ctc_decoder_c consumes per-frame probabilities, not raw logits.
@@ -42,10 +43,26 @@
 #define DEMO_NEG_LOGIT (-32)
 #define DEMO_BLANK_LOGIT (18)
 #define DEMO_PEAK_LOGIT (60)
+#define DEMO_MAX_PREFIX_LEN 64
 
 /* Current online 199K streaming thresholds from test_infer_stream_229_tflite_int8/summary.json. */
 #define DEMO_THRESHOLD_HI_XIAO_WEN 0.088f
 #define DEMO_THRESHOLD_NI_HAO_WEN_WEN 0.0f
+
+static void* demo_allocator_malloc(void* user_data, size_t size) {
+    (void)user_data;
+    return malloc(size);
+}
+
+static void* demo_allocator_calloc(void* user_data, size_t count, size_t size) {
+    (void)user_data;
+    return calloc(count, size);
+}
+
+static void demo_allocator_free(void* user_data, void* ptr) {
+    (void)user_data;
+    free(ptr);
+}
 
 static void fill_background_q_logits(int8_t* q_logits, int32_t vocab_size) {
     int32_t token;
@@ -189,6 +206,7 @@ int main(void) {
     const int32_t logit_zero_point = 0;
 
     CTCDecoderCConfig config;
+    CTCDecoderCAllocator allocator;
     CTCDecoderCState decoder;
     int8_t q_logits[DEMO_VOCAB_SIZE];
     float frame_logits[DEMO_VOCAB_SIZE];
@@ -200,10 +218,16 @@ int main(void) {
     config.min_frames = 5;
     config.max_frames = 250;
     config.interval_frames = 50;
+    config.max_prefix_len = DEMO_MAX_PREFIX_LEN;
 
-    status = ctc_decoder_c_init(&decoder, &config);
+    allocator.malloc_fn = demo_allocator_malloc;
+    allocator.calloc_fn = demo_allocator_calloc;
+    allocator.free_fn = demo_allocator_free;
+    allocator.user_data = NULL;
+
+    status = ctc_decoder_c_init_with_allocator(&decoder, &config, &allocator);
     if (status != 0) {
-        fprintf(stderr, "ctc_decoder_c_init failed\n");
+        fprintf(stderr, "ctc_decoder_c_init_with_allocator failed\n");
         return 1;
     }
 
@@ -231,7 +255,7 @@ int main(void) {
         return 1;
     }
 
-    printf("demo_config: sr=%d chunk=%d(20ms) frame_len=%d(25ms) frame_shift=%d(10ms) mel=%d frame_skip=%d score_beam=%d path_beam=%d min_frames=%d max_frames=%d interval=%d\n",
+    printf("demo_config: sr=%d chunk=%d(20ms) frame_len=%d(25ms) frame_shift=%d(10ms) mel=%d frame_skip=%d score_beam=%d path_beam=%d min_frames=%d max_frames=%d interval=%d max_prefix_len=%d\n",
            DEMO_SAMPLE_RATE,
            DEMO_AUDIO_CHUNK_SAMPLES,
            DEMO_FBANK_FRAME_LENGTH_SAMPLES,
@@ -242,7 +266,8 @@ int main(void) {
            config.path_beam_size,
            config.min_frames,
            config.max_frames,
-           config.interval_frames);
+           config.interval_frames,
+           decoder.config.max_prefix_len);
     printf("keywords: 嗨小问=[16,11,3] threshold=%.3f; 你好问问=[6,9,3,3] threshold=%.3f\n",
            DEMO_THRESHOLD_HI_XIAO_WEN,
            DEMO_THRESHOLD_NI_HAO_WEN_WEN);

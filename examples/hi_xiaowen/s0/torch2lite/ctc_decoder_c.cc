@@ -5,9 +5,57 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef CTC_DECODER_C_DEFAULT_PREFIX_EXTRA
-#define CTC_DECODER_C_DEFAULT_PREFIX_EXTRA 64
+#ifndef CTC_DECODER_C_DEFAULT_MAX_PREFIX_LEN
+#define CTC_DECODER_C_DEFAULT_MAX_PREFIX_LEN 64
 #endif
+
+static void* ctc_decoder_c_default_malloc(void* user_data, size_t size) {
+    (void)user_data;
+    return malloc(size);
+}
+
+static void* ctc_decoder_c_default_calloc(void* user_data, size_t count, size_t size) {
+    (void)user_data;
+    return calloc(count, size);
+}
+
+static void ctc_decoder_c_default_free(void* user_data, void* ptr) {
+    (void)user_data;
+    free(ptr);
+}
+
+void ctc_decoder_c_init_default_allocator(CTCDecoderCAllocator* allocator) {
+    if (!allocator) {
+        return;
+    }
+    allocator->malloc_fn = ctc_decoder_c_default_malloc;
+    allocator->calloc_fn = ctc_decoder_c_default_calloc;
+    allocator->free_fn = ctc_decoder_c_default_free;
+    allocator->user_data = NULL;
+}
+
+static void ctc_decoder_c_resolve_allocator(
+    const CTCDecoderCAllocator* allocator,
+    CTCDecoderCAllocator* resolved_allocator) {
+    if (allocator && allocator->malloc_fn && allocator->calloc_fn && allocator->free_fn) {
+        *resolved_allocator = *allocator;
+        return;
+    }
+    ctc_decoder_c_init_default_allocator(resolved_allocator);
+}
+
+static void* ctc_decoder_c_alloc_zeroed(
+    const CTCDecoderCAllocator* allocator,
+    size_t count,
+    size_t elem_size) {
+    return allocator->calloc_fn(allocator->user_data, count, elem_size);
+}
+
+static void ctc_decoder_c_release_bytes(const CTCDecoderCAllocator* allocator, void* ptr) {
+    if (ptr) {
+        allocator->free_fn(allocator->user_data, ptr);
+    }
+}
 
 static void ctc_decoder_c_zero_state(CTCDecoderCState* state) {
     memset(state, 0, sizeof(*state));
@@ -30,10 +78,10 @@ void ctc_decoder_c_init_default_config(CTCDecoderCConfig* config) {
 static int32_t ctc_decoder_c_resolve_max_prefix_len(const CTCDecoderCConfig* config) {
     int32_t max_prefix_len = config->max_prefix_len;
     if (max_prefix_len <= 0) {
-        max_prefix_len = config->max_frames + CTC_DECODER_C_DEFAULT_PREFIX_EXTRA;
+        max_prefix_len = CTC_DECODER_C_DEFAULT_MAX_PREFIX_LEN;
     }
-    if (max_prefix_len < 64) {
-        max_prefix_len = 64;
+    if (max_prefix_len < CTC_DECODER_C_DEFAULT_MAX_PREFIX_LEN) {
+        max_prefix_len = CTC_DECODER_C_DEFAULT_MAX_PREFIX_LEN;
     }
     return max_prefix_len;
 }
@@ -346,49 +394,86 @@ static int32_t ctc_decoder_c_finalize_frame(CTCDecoderCState* state) {
     return ctc_decoder_c_compact_node_pool(state);
 }
 
+static void ctc_decoder_c_cleanup_keyword_storage(CTCDecoderCState* state) {
+    ctc_decoder_c_release_bytes(&state->allocator, state->keywords);
+    ctc_decoder_c_release_bytes(&state->allocator, state->keyword_token_storage);
+    ctc_decoder_c_release_bytes(&state->allocator, state->keywords_idxset);
+    ctc_decoder_c_release_bytes(&state->allocator, (void*)state->keyword_strings);
+    ctc_decoder_c_release_bytes(&state->allocator, state->keyword_string_storage);
+    ctc_decoder_c_release_bytes(&state->allocator, state->thresholds);
+    ctc_decoder_c_release_bytes(&state->allocator, state->threshold_valid);
+    state->keywords = NULL;
+    state->keyword_token_storage = NULL;
+    state->keywords_idxset = NULL;
+    state->keyword_strings = NULL;
+    state->keyword_string_storage = NULL;
+    state->thresholds = NULL;
+    state->threshold_valid = NULL;
+    state->num_keywords = 0;
+    state->num_keywords_idxset = 0;
+    state->keyword_token_storage_size = 0;
+    state->keyword_string_stride = 0;
+}
+
 int32_t ctc_decoder_c_init(CTCDecoderCState* state, const CTCDecoderCConfig* config) {
+    return ctc_decoder_c_init_with_allocator(state, config, NULL);
+}
+
+int32_t ctc_decoder_c_init_with_allocator(
+    CTCDecoderCState* state,
+    const CTCDecoderCConfig* config,
+    const CTCDecoderCAllocator* allocator) {
     int32_t max_prefix_len;
     ptrdiff_t prefix_slots_cur;
     ptrdiff_t prefix_slots_next;
+    ptrdiff_t node_pool_capacity;
+    CTCDecoderCAllocator resolved_allocator;
     if (!state || !config) {
         return -1;
     }
     if (config->score_beam_size <= 0 || config->path_beam_size <= 0) {
         return -1;
     }
+
     ctc_decoder_c_zero_state(state);
+    ctc_decoder_c_resolve_allocator(allocator, &resolved_allocator);
+    state->allocator = resolved_allocator;
     state->config = *config;
     state->config.max_prefix_len = ctc_decoder_c_resolve_max_prefix_len(config);
     max_prefix_len = state->config.max_prefix_len;
     state->cur_hyp_capacity = state->config.path_beam_size;
     state->next_hyp_capacity = state->config.path_beam_size * (state->config.score_beam_size + 1);
-    state->node_pool_capacity = state->next_hyp_capacity * state->config.max_prefix_len * 2;
-    if (state->next_hyp_capacity < state->config.path_beam_size || state->node_pool_capacity <= 0) {
+    node_pool_capacity = (ptrdiff_t)state->next_hyp_capacity * max_prefix_len;
+    if (state->next_hyp_capacity < state->config.path_beam_size || node_pool_capacity <= 0) {
         return -1;
     }
+    state->node_pool_capacity = (int32_t)node_pool_capacity;
 
-    state->cur_hyps = (CTCDecoderCHypothesis*)calloc((size_t)state->cur_hyp_capacity, sizeof(CTCDecoderCHypothesis));
-    state->next_hyps = (CTCDecoderCHypothesis*)calloc((size_t)state->next_hyp_capacity, sizeof(CTCDecoderCHypothesis));
     prefix_slots_cur = (ptrdiff_t)state->cur_hyp_capacity * max_prefix_len;
     prefix_slots_next = (ptrdiff_t)state->next_hyp_capacity * max_prefix_len;
-    state->cur_prefix_storage = (int32_t*)calloc((size_t)prefix_slots_cur, sizeof(int32_t));
-    state->next_prefix_storage = (int32_t*)calloc((size_t)prefix_slots_next, sizeof(int32_t));
-    state->cur_node_storage = (CTCDecoderCTokenNode*)calloc((size_t)prefix_slots_cur, sizeof(CTCDecoderCTokenNode));
-    state->next_node_storage = (CTCDecoderCTokenNode*)calloc((size_t)prefix_slots_next, sizeof(CTCDecoderCTokenNode));
-    state->cur_node_ref_storage = (int32_t*)calloc((size_t)prefix_slots_cur, sizeof(int32_t));
-    state->next_node_ref_storage = (int32_t*)calloc((size_t)prefix_slots_next, sizeof(int32_t));
+
+    state->cur_hyps = (CTCDecoderCHypothesis*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)state->cur_hyp_capacity, sizeof(CTCDecoderCHypothesis));
+    state->next_hyps = (CTCDecoderCHypothesis*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)state->next_hyp_capacity, sizeof(CTCDecoderCHypothesis));
+    state->cur_prefix_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_cur, sizeof(int32_t));
+    state->next_prefix_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_next, sizeof(int32_t));
+    state->cur_node_storage = (CTCDecoderCTokenNode*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_cur, sizeof(CTCDecoderCTokenNode));
+    state->next_node_storage = (CTCDecoderCTokenNode*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_next, sizeof(CTCDecoderCTokenNode));
+    state->cur_node_ref_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_cur, sizeof(int32_t));
+    state->next_node_ref_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)prefix_slots_next, sizeof(int32_t));
     state->topk_capacity = state->config.score_beam_size;
-    state->topk_probs = (float*)calloc((size_t)state->topk_capacity, sizeof(float));
-    state->topk_indices = (int32_t*)calloc((size_t)state->topk_capacity, sizeof(int32_t));
-    state->temp_prefix = (int32_t*)calloc((size_t)max_prefix_len, sizeof(int32_t));
-    state->node_pool = (CTCDecoderCTokenNode*)calloc((size_t)state->node_pool_capacity, sizeof(CTCDecoderCTokenNode));
-    state->node_pool_tmp = (CTCDecoderCTokenNode*)calloc((size_t)state->node_pool_capacity, sizeof(CTCDecoderCTokenNode));
-    state->node_ref_remap = (int32_t*)calloc((size_t)state->node_pool_capacity, sizeof(int32_t));
+    state->topk_probs = (float*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)state->topk_capacity, sizeof(float));
+    state->topk_indices = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)state->topk_capacity, sizeof(int32_t));
+    state->temp_prefix = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)max_prefix_len, sizeof(int32_t));
+    state->node_pool = (CTCDecoderCTokenNode*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)state->node_pool_capacity, sizeof(CTCDecoderCTokenNode));
+
+    /* Reuse next-frame materialization scratch during compaction. */
+    state->node_pool_tmp = state->next_node_storage;
+    state->node_ref_remap = state->next_node_ref_storage;
 
     if (!state->cur_hyps || !state->next_hyps || !state->cur_prefix_storage || !state->next_prefix_storage ||
         !state->cur_node_storage || !state->next_node_storage || !state->cur_node_ref_storage ||
         !state->next_node_ref_storage || !state->topk_probs || !state->topk_indices || !state->temp_prefix ||
-        !state->node_pool || !state->node_pool_tmp || !state->node_ref_remap) {
+        !state->node_pool) {
         ctc_decoder_c_free(state);
         return -1;
     }
@@ -400,30 +485,42 @@ int32_t ctc_decoder_c_init(CTCDecoderCState* state, const CTCDecoderCConfig* con
 }
 
 void ctc_decoder_c_free(CTCDecoderCState* state) {
+    int32_t reuse_next_node_storage;
+    int32_t reuse_next_node_ref_storage;
+    CTCDecoderCAllocator allocator;
     if (!state) {
         return;
     }
-    free(state->cur_hyps);
-    free(state->next_hyps);
-    free(state->cur_prefix_storage);
-    free(state->next_prefix_storage);
-    free(state->cur_node_storage);
-    free(state->next_node_storage);
-    free(state->cur_node_ref_storage);
-    free(state->next_node_ref_storage);
-    free(state->topk_probs);
-    free(state->topk_indices);
-    free(state->temp_prefix);
-    free(state->node_pool);
-    free(state->node_pool_tmp);
-    free(state->node_ref_remap);
-    free(state->keywords);
-    free(state->keyword_token_storage);
-    free(state->keywords_idxset);
-    free(state->keyword_strings);
-    free(state->keyword_string_storage);
-    free(state->thresholds);
-    free(state->threshold_valid);
+
+    ctc_decoder_c_resolve_allocator(&state->allocator, &allocator);
+    reuse_next_node_storage = state->node_pool_tmp == state->next_node_storage;
+    reuse_next_node_ref_storage = state->node_ref_remap == state->next_node_ref_storage;
+
+    ctc_decoder_c_release_bytes(&allocator, state->cur_hyps);
+    ctc_decoder_c_release_bytes(&allocator, state->next_hyps);
+    ctc_decoder_c_release_bytes(&allocator, state->cur_prefix_storage);
+    ctc_decoder_c_release_bytes(&allocator, state->next_prefix_storage);
+    ctc_decoder_c_release_bytes(&allocator, state->cur_node_storage);
+    ctc_decoder_c_release_bytes(&allocator, state->cur_node_ref_storage);
+    ctc_decoder_c_release_bytes(&allocator, state->topk_probs);
+    ctc_decoder_c_release_bytes(&allocator, state->topk_indices);
+    ctc_decoder_c_release_bytes(&allocator, state->temp_prefix);
+    ctc_decoder_c_release_bytes(&allocator, state->node_pool);
+    if (!reuse_next_node_storage) {
+        ctc_decoder_c_release_bytes(&allocator, state->node_pool_tmp);
+    }
+    if (!reuse_next_node_ref_storage) {
+        ctc_decoder_c_release_bytes(&allocator, state->node_ref_remap);
+    }
+    ctc_decoder_c_release_bytes(&allocator, state->next_node_storage);
+    ctc_decoder_c_release_bytes(&allocator, state->next_node_ref_storage);
+    ctc_decoder_c_release_bytes(&allocator, state->keywords);
+    ctc_decoder_c_release_bytes(&allocator, state->keyword_token_storage);
+    ctc_decoder_c_release_bytes(&allocator, state->keywords_idxset);
+    ctc_decoder_c_release_bytes(&allocator, (void*)state->keyword_strings);
+    ctc_decoder_c_release_bytes(&allocator, state->keyword_string_storage);
+    ctc_decoder_c_release_bytes(&allocator, state->thresholds);
+    ctc_decoder_c_release_bytes(&allocator, state->threshold_valid);
     ctc_decoder_c_zero_state(state);
 }
 
@@ -441,22 +538,8 @@ int32_t ctc_decoder_c_set_keywords(
     if (!state || num_keywords < 0 || num_keywords_idxset < 0) {
         return -1;
     }
-    free(state->keywords);
-    free(state->keyword_token_storage);
-    free(state->keywords_idxset);
-    free(state->keyword_strings);
-    free(state->keyword_string_storage);
-    free(state->thresholds);
-    free(state->threshold_valid);
-    state->keywords = NULL;
-    state->keyword_token_storage = NULL;
-    state->keywords_idxset = NULL;
-    state->keyword_strings = NULL;
-    state->keyword_string_storage = NULL;
-    state->thresholds = NULL;
-    state->threshold_valid = NULL;
-    state->num_keywords = 0;
-    state->num_keywords_idxset = 0;
+
+    ctc_decoder_c_cleanup_keyword_storage(state);
 
     for (index = 0; index < num_keywords; ++index) {
         if (keywords[index].token_count < 0 || keywords[index].token_count > state->config.max_prefix_len) {
@@ -466,11 +549,11 @@ int32_t ctc_decoder_c_set_keywords(
     }
 
     if (num_keywords > 0) {
-        state->keywords = (CTCDecoderCKeyword*)calloc((size_t)num_keywords, sizeof(CTCDecoderCKeyword));
-        state->keyword_token_storage = (int32_t*)calloc((size_t)total_tokens, sizeof(int32_t));
-        state->keyword_strings = (const char**)calloc((size_t)num_keywords, sizeof(const char*));
-        state->thresholds = (float*)calloc((size_t)num_keywords, sizeof(float));
-        state->threshold_valid = (uint8_t*)calloc((size_t)num_keywords, sizeof(uint8_t));
+        state->keywords = (CTCDecoderCKeyword*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)num_keywords, sizeof(CTCDecoderCKeyword));
+        state->keyword_token_storage = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)total_tokens, sizeof(int32_t));
+        state->keyword_strings = (const char**)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)num_keywords, sizeof(const char*));
+        state->thresholds = (float*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)num_keywords, sizeof(float));
+        state->threshold_valid = (uint8_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)num_keywords, sizeof(uint8_t));
         if (!state->keywords || !state->keyword_token_storage || !state->keyword_strings || !state->thresholds || !state->threshold_valid) {
             return -1;
         }
@@ -482,7 +565,7 @@ int32_t ctc_decoder_c_set_keywords(
                 }
             }
             state->keyword_string_stride = stride;
-            state->keyword_string_storage = (char*)calloc((size_t)num_keywords * stride, sizeof(char));
+            state->keyword_string_storage = (char*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)num_keywords * stride, sizeof(char));
             if (!state->keyword_string_storage) {
                 return -1;
             }
@@ -505,7 +588,7 @@ int32_t ctc_decoder_c_set_keywords(
     }
 
     if (num_keywords_idxset > 0) {
-        state->keywords_idxset = (int32_t*)calloc((size_t)num_keywords_idxset, sizeof(int32_t));
+        state->keywords_idxset = (int32_t*)ctc_decoder_c_alloc_zeroed(&state->allocator, (size_t)num_keywords_idxset, sizeof(int32_t));
         if (!state->keywords_idxset) {
             return -1;
         }
