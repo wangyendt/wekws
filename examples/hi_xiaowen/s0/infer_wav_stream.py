@@ -248,6 +248,7 @@ class StreamingKeywordSpotter:
                 min_frames=min_frames,
                 max_frames=max_frames,
                 interval_frames=interval_frames,
+                frame_step=self.downsampling,
             )
             self._native_decoder.set_keywords(keywords_token, keywords_idxset)
             self._native_decoder.set_thresholds(threshold_map)
@@ -408,9 +409,9 @@ class StreamingKeywordSpotter:
 
     def _step_decoder(self, absolute_frame: int, prob: torch.Tensor) -> Optional[Dict[str, object]]:
         if self._native_decoder is not None:
-            self._native_decoder.advance_frame(absolute_frame, prob)
+            del absolute_frame
             return self._normalize_cpp_result(
-                self._native_decoder.execute_detection(self.disable_threshold)
+                self._native_decoder.step_and_detect_next(prob, self.disable_threshold)
             )
 
         self.cur_hyps = streaming_ctc_prefix_beam_search_step(
@@ -454,9 +455,10 @@ class StreamingKeywordSpotter:
                 break
 
         self.total_frames += len(probs) * self.downsampling
-        start = self._get_first_hyp_start_frame()
-        if start >= 0 and (self.total_frames - start) > self.max_frames:
-            self.reset_decode_state()
+        if self._native_decoder is None:
+            start = self._get_first_hyp_start_frame()
+            if start >= 0 and (self.total_frames - start) > self.max_frames:
+                self.reset_decode_state()
 
         return last_activation
 

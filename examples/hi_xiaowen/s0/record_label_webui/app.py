@@ -484,11 +484,14 @@ def load_explicit_infer_resources(
 def infer_audio_file(wav_path: Path, resources: Dict) -> Dict:
     feats = iw.build_input_features(wav_path, resources["configs"])
     probs = iw.run_model_forward(resources["model"], feats, resources["device"], resources["is_jit"])
-    decode_result = iw.decode_keyword_hit_with_token_info(
-        probs=probs,
-        keywords=resources["keywords"],
-        keywords_token=resources["keywords_token"],
-        keywords_idxset=resources["keywords_idxset"],
+    decode_result = iw.scale_decode_result_frames(
+        iw.decode_keyword_hit_with_token_info(
+            probs=probs,
+            keywords=resources["keywords"],
+            keywords_token=resources["keywords_token"],
+            keywords_idxset=resources["keywords_idxset"],
+        ),
+        iw.get_frame_skip(resources["configs"]),
     )
     result = iw.format_result(
         wav_path=wav_path,

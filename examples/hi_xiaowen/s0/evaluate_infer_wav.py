@@ -354,11 +354,14 @@ def worker_eval(
                 for item_index, key in enumerate(keys):
                     utt_len = int(lengths[item_index].item())
                     probs_i = probs_batch[item_index][:utt_len]
-                    decode_result = iw.decode_keyword_hit_with_token_info(
-                        probs=probs_i,
-                        keywords=keywords,
-                        keywords_token=keywords_token,
-                        keywords_idxset=keywords_idxset,
+                    decode_result = iw.scale_decode_result_frames(
+                        iw.decode_keyword_hit_with_token_info(
+                            probs=probs_i,
+                            keywords=keywords,
+                            keywords_token=keywords_token,
+                            keywords_idxset=keywords_idxset,
+                        ),
+                        iw.get_frame_skip(configs),
                     )
                     score_fout.write(score_line_from_decode(key, decode_result))
                     meta = labels_by_key[key]

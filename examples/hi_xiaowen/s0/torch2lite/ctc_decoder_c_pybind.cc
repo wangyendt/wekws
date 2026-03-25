@@ -14,6 +14,7 @@ namespace py = pybind11;
 
 namespace {
 
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
 struct TokenNode {
     int32_t token;
     int32_t frame;
@@ -26,6 +27,7 @@ struct Hypothesis {
     double pnb;
     std::vector<TokenNode> nodes;
 };
+#endif
 
 class StreamingCTCDecoderCStyle {
 public:
@@ -35,7 +37,7 @@ public:
         int32_t min_frames,
         int32_t max_frames,
         int32_t interval_frames,
-        bool enable_debug_hypotheses) {
+        int32_t frame_step) {
         CTCDecoderCConfig config;
         ctc_decoder_c_init_default_config(&config);
         config.score_beam_size = score_beam_size;
@@ -43,7 +45,7 @@ public:
         config.min_frames = min_frames;
         config.max_frames = max_frames;
         config.interval_frames = interval_frames;
-        config.enable_debug_hypotheses = enable_debug_hypotheses ? 1 : 0;
+        config.frame_step = frame_step;
         if (ctc_decoder_c_init(&state_, &config) != 0) {
             throw std::runtime_error("failed to initialize C-style CTC decoder");
         }
@@ -126,6 +128,16 @@ public:
                 disable_threshold ? 1 : 0));
     }
 
+    py::object step_and_detect_next(torch::Tensor probs, bool disable_threshold) {
+        auto probs_contig = validate_probs(probs);
+        return detection_to_py(
+            ctc_decoder_c_step_and_detect_next(
+                &state_,
+                probs_contig.data_ptr<float>(),
+                static_cast<int32_t>(probs_contig.numel()),
+                disable_threshold ? 1 : 0));
+    }
+
     void reset() {
         ctc_decoder_c_reset(&state_);
     }
@@ -134,6 +146,7 @@ public:
         ctc_decoder_c_reset_beam_search(&state_);
     }
 
+#if CTC_DECODER_C_ENABLE_EXTENDED_API
     py::dict get_best_decode() const {
         auto result = ctc_decoder_c_get_best_decode(&state_);
         py::dict dict;
@@ -158,11 +171,13 @@ public:
     int32_t get_first_hyp_start_frame() const {
         return ctc_decoder_c_get_first_hyp_start_frame(&state_);
     }
+#endif
 
     int32_t num_hypotheses() const {
         return ctc_decoder_c_num_hypotheses(&state_);
     }
 
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
     std::vector<Hypothesis> get_hypotheses() const {
         std::vector<Hypothesis> hyps;
         int32_t hyp_count = ctc_decoder_c_num_hypotheses(&state_);
@@ -170,7 +185,7 @@ public:
         for (int32_t index = 0; index < hyp_count; ++index) {
             const CTCDecoderCHypothesis* hyp = ctc_decoder_c_get_hypothesis(&state_, index);
             if (!hyp) {
-                throw std::runtime_error("debug hypotheses are disabled; construct decoder with enable_debug_hypotheses=True");
+                throw std::runtime_error("failed to materialize C-style decoder hypothesis");
             }
             Hypothesis public_hyp;
             public_hyp.pb = hyp->pb;
@@ -188,6 +203,7 @@ public:
         }
         return hyps;
     }
+#endif
 
 private:
     static torch::Tensor validate_probs(torch::Tensor probs) {
@@ -221,6 +237,7 @@ private:
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "C-style streaming CTC prefix beam search decoder for KWS";
 
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
     py::class_<TokenNode>(m, "TokenNode")
         .def_readonly("token", &TokenNode::token)
         .def_readonly("frame", &TokenNode::frame)
@@ -231,25 +248,32 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readonly("pb", &Hypothesis::pb)
         .def_readonly("pnb", &Hypothesis::pnb)
         .def_readonly("nodes", &Hypothesis::nodes);
+#endif
 
     py::class_<StreamingCTCDecoderCStyle>(m, "StreamingCTCDecoderCStyle")
         .def(
-            py::init<int32_t, int32_t, int32_t, int32_t, int32_t, bool>(),
+            py::init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t>(),
             py::arg("score_beam_size") = 3,
             py::arg("path_beam_size") = 20,
             py::arg("min_frames") = 5,
             py::arg("max_frames") = 250,
             py::arg("interval_frames") = 50,
-            py::arg("enable_debug_hypotheses") = false)
+            py::arg("frame_step") = 1)
         .def("set_keywords", &StreamingCTCDecoderCStyle::set_keywords, py::arg("keywords_tokens"), py::arg("keywords_idxset"), py::arg("keyword_strings"))
         .def("set_thresholds", &StreamingCTCDecoderCStyle::set_thresholds, py::arg("threshold_map"))
         .def("advance_frame", &StreamingCTCDecoderCStyle::advance_frame, py::arg("frame_index"), py::arg("probs"))
         .def("execute_detection", &StreamingCTCDecoderCStyle::execute_detection, py::arg("disable_threshold"))
         .def("step_and_detect", &StreamingCTCDecoderCStyle::step_and_detect, py::arg("frame_index"), py::arg("probs"), py::arg("disable_threshold"))
+        .def("step_and_detect_next", &StreamingCTCDecoderCStyle::step_and_detect_next, py::arg("probs"), py::arg("disable_threshold"))
         .def("reset", &StreamingCTCDecoderCStyle::reset)
         .def("reset_beam_search", &StreamingCTCDecoderCStyle::reset_beam_search)
+#if CTC_DECODER_C_ENABLE_EXTENDED_API
         .def("get_best_decode", &StreamingCTCDecoderCStyle::get_best_decode)
         .def("get_first_hyp_start_frame", &StreamingCTCDecoderCStyle::get_first_hyp_start_frame)
+#endif
         .def("num_hypotheses", &StreamingCTCDecoderCStyle::num_hypotheses)
-        .def("get_hypotheses", &StreamingCTCDecoderCStyle::get_hypotheses);
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+        .def("get_hypotheses", &StreamingCTCDecoderCStyle::get_hypotheses)
+#endif
+        ;
 }

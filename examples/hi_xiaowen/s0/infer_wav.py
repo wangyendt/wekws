@@ -402,10 +402,24 @@ def get_time_resolution_sec(configs: Dict) -> float:
     dataset_conf = configs.get("dataset_conf", {})
     fbank_conf = dataset_conf.get("fbank_conf", {})
     frame_shift_ms = float(fbank_conf.get("frame_shift", 10))
+    return frame_shift_ms / 1000.0
+
+
+def get_frame_skip(configs: Dict) -> int:
+    dataset_conf = configs.get("dataset_conf", {})
     frame_skip = int(dataset_conf.get("frame_skip", 1))
-    if frame_skip <= 0:
-        frame_skip = 1
-    return frame_shift_ms * frame_skip / 1000.0
+    return frame_skip if frame_skip > 0 else 1
+
+
+def scale_decode_result_frames(decode_result: Dict[str, object], frame_scale: int) -> Dict[str, object]:
+    if frame_scale <= 1:
+        return dict(decode_result)
+    scaled = dict(decode_result)
+    start_frame = scaled.get("start_frame")
+    end_frame = scaled.get("end_frame")
+    scaled["start_frame"] = None if start_frame is None else int(start_frame) * frame_scale
+    scaled["end_frame"] = None if end_frame is None else int(end_frame) * frame_scale
+    return scaled
 
 
 def load_wav_and_resample(wav_path: Path, target_sr: int) -> torch.Tensor:
@@ -776,7 +790,10 @@ def main():
     model, device, model_type = load_model(model_info["checkpoint"], configs, args.gpu)
     feats = build_input_features(wav_path, configs)
     probs = run_model_forward(model, feats, device, model_type)
-    decode_result = decode_keyword_hit(probs, keywords, model_info["dict_dir"])
+    decode_result = scale_decode_result_frames(
+        decode_keyword_hit(probs, keywords, model_info["dict_dir"]),
+        get_frame_skip(configs),
+    )
     threshold_map = load_threshold_map(args, model_info, keywords)
     time_resolution_sec = get_time_resolution_sec(configs)
     result = format_result(

@@ -218,6 +218,7 @@ int main(void) {
     config.min_frames = 5;
     config.max_frames = 250;
     config.interval_frames = 50;
+    config.frame_step = DEMO_FRAME_SKIP;
     config.max_prefix_len = DEMO_MAX_PREFIX_LEN;
 
     allocator.malloc_fn = demo_allocator_malloc;

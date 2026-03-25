@@ -487,11 +487,14 @@ def diagnose_one_wav(wav_path: Path, args, resources: Dict, id2tok: Dict[int, st
     logits = run_model_logits(resources["model"], feats, resources["device"], resources["is_jit"])
     probs = logits.softmax(dim=-1)
 
-    raw_decode = iw.decode_keyword_hit_with_token_info(
-        probs=probs,
-        keywords=resources["keywords"],
-        keywords_token=resources["keywords_token"],
-        keywords_idxset=resources["keywords_idxset"],
+    raw_decode = iw.scale_decode_result_frames(
+        iw.decode_keyword_hit_with_token_info(
+            probs=probs,
+            keywords=resources["keywords"],
+            keywords_token=resources["keywords_token"],
+            keywords_idxset=resources["keywords_idxset"],
+        ),
+        iw.get_frame_skip(resources["configs"]),
     )
     final_result = iw.format_result(
         wav_path=wav_path,

@@ -4,6 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef CTC_DECODER_C_ENABLE_EXTENDED_API
+#define CTC_DECODER_C_ENABLE_EXTENDED_API 1
+#endif
+
+#ifndef CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+#define CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,7 +27,9 @@ typedef struct {
     int32_t prefix_len;
     double pb;
     double pnb;
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
     CTCDecoderCTokenNode* nodes;
+#endif
     int32_t* node_refs;
     int32_t node_count;
 } CTCDecoderCHypothesis;
@@ -36,8 +46,8 @@ typedef struct {
     int32_t min_frames;
     int32_t max_frames;
     int32_t interval_frames;
+    int32_t frame_step;
     int32_t max_prefix_len;
-    int32_t enable_debug_hypotheses;
 } CTCDecoderCConfig;
 
 typedef struct {
@@ -75,7 +85,9 @@ typedef struct {
 
     int32_t* cur_prefix_storage;
     int32_t* next_prefix_storage;
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
     CTCDecoderCTokenNode* cur_node_storage;
+#endif
     int32_t* cur_node_ref_storage;
     int32_t* next_node_ref_storage;
 
@@ -103,11 +115,14 @@ typedef struct {
     uint8_t* threshold_valid;
 
     int32_t last_active_pos;
+    int32_t next_frame_index;
+#if CTC_DECODER_C_ENABLE_EXTENDED_API
     int32_t has_best_decode;
     int32_t best_word_index;
     double best_score;
     int32_t best_start_frame;
     int32_t best_end_frame;
+#endif
 } CTCDecoderCState;
 
 void ctc_decoder_c_init_default_config(CTCDecoderCConfig* config);
@@ -150,14 +165,24 @@ CTCDecoderCDetectionResult ctc_decoder_c_step_and_detect(
     int32_t vocab_size,
     int32_t disable_threshold);
 
+CTCDecoderCDetectionResult ctc_decoder_c_step_and_detect_next(
+    CTCDecoderCState* state,
+    const float* probs,
+    int32_t vocab_size,
+    int32_t disable_threshold);
+
 void ctc_decoder_c_reset(CTCDecoderCState* state);
 void ctc_decoder_c_reset_beam_search(CTCDecoderCState* state);
+#if CTC_DECODER_C_ENABLE_EXTENDED_API
 CTCDecoderCBestDecodeResult ctc_decoder_c_get_best_decode(const CTCDecoderCState* state);
 int32_t ctc_decoder_c_get_first_hyp_start_frame(const CTCDecoderCState* state);
+#endif
 int32_t ctc_decoder_c_num_hypotheses(const CTCDecoderCState* state);
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
 const CTCDecoderCHypothesis* ctc_decoder_c_get_hypothesis(
     const CTCDecoderCState* state,
     int32_t index);
+#endif
 
 #ifdef __cplusplus
 }

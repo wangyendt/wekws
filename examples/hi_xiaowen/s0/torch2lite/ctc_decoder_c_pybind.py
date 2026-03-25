@@ -43,7 +43,7 @@ class StreamingCTCDecoderC:
         min_frames: int = 5,
         max_frames: int = 250,
         interval_frames: int = 50,
-        enable_debug_hypotheses: bool = False,
+        frame_step: int = 1,
     ) -> None:
         self._decoder = _load_extension().StreamingCTCDecoderCStyle(
             score_beam_size,
@@ -51,7 +51,7 @@ class StreamingCTCDecoderC:
             min_frames,
             max_frames,
             interval_frames,
-            enable_debug_hypotheses,
+            frame_step,
         )
         self._keyword_strings: List[str] = []
         self._keyword_to_idx: Dict[str, int] = {}
@@ -91,6 +91,9 @@ class StreamingCTCDecoderC:
     def step_and_detect(self, frame_index, probs, disable_threshold: bool = False):
         return self._decoder.step_and_detect(frame_index, probs, disable_threshold)
 
+    def step_and_detect_next(self, probs, disable_threshold: bool = False):
+        return self._decoder.step_and_detect_next(probs, disable_threshold)
+
     def reset(self) -> None:
         self._decoder.reset()
 
@@ -98,9 +101,13 @@ class StreamingCTCDecoderC:
         self._decoder.reset_beam_search()
 
     def get_best_decode_result(self) -> dict:
+        if not hasattr(self._decoder, "get_best_decode"):
+            raise RuntimeError("extended decoder API is disabled at build time")
         return self._decoder.get_best_decode()
 
     def get_first_hyp_start_frame(self) -> int:
+        if not hasattr(self._decoder, "get_first_hyp_start_frame"):
+            raise RuntimeError("extended decoder API is disabled at build time")
         return self._decoder.get_first_hyp_start_frame()
 
     @property
@@ -108,4 +115,6 @@ class StreamingCTCDecoderC:
         return self._decoder.num_hypotheses()
 
     def get_hypotheses(self):
+        if not hasattr(self._decoder, "get_hypotheses"):
+            raise RuntimeError("debug hypotheses API is disabled at build time")
         return self._decoder.get_hypotheses()

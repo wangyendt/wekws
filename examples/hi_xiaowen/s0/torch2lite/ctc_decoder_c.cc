@@ -60,7 +60,9 @@ static void ctc_decoder_c_release_bytes(const CTCDecoderCAllocator* allocator, v
 static void ctc_decoder_c_zero_state(CTCDecoderCState* state) {
     memset(state, 0, sizeof(*state));
     state->last_active_pos = -1;
+#if CTC_DECODER_C_ENABLE_EXTENDED_API
     state->best_word_index = -1;
+#endif
 }
 
 void ctc_decoder_c_init_default_config(CTCDecoderCConfig* config) {
@@ -72,8 +74,8 @@ void ctc_decoder_c_init_default_config(CTCDecoderCConfig* config) {
     config->min_frames = 5;
     config->max_frames = 250;
     config->interval_frames = 50;
+    config->frame_step = 1;
     config->max_prefix_len = 0;
-    config->enable_debug_hypotheses = 0;
 }
 
 static int32_t ctc_decoder_c_resolve_max_prefix_len(const CTCDecoderCConfig* config) {
@@ -104,18 +106,18 @@ static void ctc_decoder_c_bind_hypothesis_storage(
     int32_t index;
     for (index = 0; index < hyp_count; ++index) {
         hyps[index].prefix = prefix_storage + ((ptrdiff_t)index * max_prefix_len);
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
         hyps[index].nodes = node_storage ? (node_storage + ((ptrdiff_t)index * max_prefix_len)) : NULL;
+#endif
         hyps[index].node_refs = node_ref_storage + ((ptrdiff_t)index * max_prefix_len);
         ctc_decoder_c_reset_hypothesis(&hyps[index]);
     }
 }
 
-static int32_t ctc_decoder_c_enable_debug_hypotheses(CTCDecoderCState* state) {
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+static int32_t ctc_decoder_c_init_debug_hypotheses(CTCDecoderCState* state) {
     int32_t index;
     ptrdiff_t node_slots;
-    if (!state->config.enable_debug_hypotheses) {
-        return 0;
-    }
     if (state->cur_node_storage) {
         return 0;
     }
@@ -138,7 +140,7 @@ static int32_t ctc_decoder_c_materialize_hypothesis(
     CTCDecoderCState* state,
     CTCDecoderCHypothesis* hyp) {
     int32_t index;
-    if (!state->config.enable_debug_hypotheses || !state->cur_node_storage) {
+    if (!state->cur_node_storage) {
         return -1;
     }
     for (index = 0; index < hyp->node_count; ++index) {
@@ -149,6 +151,7 @@ static int32_t ctc_decoder_c_materialize_hypothesis(
     }
     return 0;
 }
+#endif
 
 static void ctc_decoder_c_init_beam_state(CTCDecoderCState* state) {
     int32_t index;
@@ -468,7 +471,7 @@ int32_t ctc_decoder_c_init_with_allocator(
     if (!state || !config) {
         return -1;
     }
-    if (config->score_beam_size <= 0 || config->path_beam_size <= 0) {
+    if (config->score_beam_size <= 0 || config->path_beam_size <= 0 || config->frame_step <= 0) {
         return -1;
     }
 
@@ -511,10 +514,12 @@ int32_t ctc_decoder_c_init_with_allocator(
 
     ctc_decoder_c_bind_hypothesis_storage(state->cur_hyps, state->cur_hyp_capacity, state->cur_prefix_storage, NULL, state->cur_node_ref_storage, max_prefix_len);
     ctc_decoder_c_bind_hypothesis_storage(state->next_hyps, state->next_hyp_capacity, state->next_prefix_storage, NULL, state->next_node_ref_storage, max_prefix_len);
-    if (ctc_decoder_c_enable_debug_hypotheses(state) != 0) {
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+    if (ctc_decoder_c_init_debug_hypotheses(state) != 0) {
         ctc_decoder_c_free(state);
         return -1;
     }
+#endif
     ctc_decoder_c_init_beam_state(state);
     return 0;
 }
@@ -531,7 +536,9 @@ void ctc_decoder_c_free(CTCDecoderCState* state) {
     ctc_decoder_c_release_bytes(&allocator, state->next_hyps);
     ctc_decoder_c_release_bytes(&allocator, state->cur_prefix_storage);
     ctc_decoder_c_release_bytes(&allocator, state->next_prefix_storage);
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
     ctc_decoder_c_release_bytes(&allocator, state->cur_node_storage);
+#endif
     ctc_decoder_c_release_bytes(&allocator, state->cur_node_ref_storage);
     ctc_decoder_c_release_bytes(&allocator, state->topk_probs);
     ctc_decoder_c_release_bytes(&allocator, state->topk_indices);
@@ -829,6 +836,7 @@ CTCDecoderCDetectionResult ctc_decoder_c_execute_detection(CTCDecoderCState* sta
             }
             score = sqrt(score);
             duration = end_frame - start_frame;
+#if CTC_DECODER_C_ENABLE_EXTENDED_API
             if (!state->has_best_decode || score > state->best_score) {
                 state->best_word_index = keyword->word_index;
                 state->best_score = score;
@@ -836,6 +844,7 @@ CTCDecoderCDetectionResult ctc_decoder_c_execute_detection(CTCDecoderCState* sta
                 state->best_end_frame = end_frame;
                 state->has_best_decode = 1;
             }
+#endif
             if (!passed_threshold && keyword->word_index >= 0 && keyword->word_index < state->num_keywords && state->threshold_valid[keyword->word_index] && score >= (double)state->thresholds[keyword->word_index]) {
                 passed_threshold = 1;
             }
@@ -859,23 +868,70 @@ CTCDecoderCDetectionResult ctc_decoder_c_execute_detection(CTCDecoderCState* sta
     return result;
 }
 
+static CTCDecoderCDetectionResult ctc_decoder_c_invalid_detection_result(void) {
+    CTCDecoderCDetectionResult result;
+    result.word_index = -1;
+    result.keyword = NULL;
+    result.score = 0.0;
+    result.start_frame = 0;
+    result.end_frame = 0;
+    result.valid = 0;
+    return result;
+}
+
+static int32_t ctc_decoder_c_peek_first_hyp_start_frame(const CTCDecoderCState* state) {
+    if (!state || state->cur_hyp_count <= 0 || state->cur_hyps[0].node_count <= 0) {
+        return -1;
+    }
+    return state->node_pool[state->cur_hyps[0].node_refs[0]].frame;
+}
+
+static void ctc_decoder_c_maybe_reset_stale_beam(
+    CTCDecoderCState* state,
+    int32_t next_frame_index) {
+    int32_t start_frame;
+    if (!state || state->config.max_frames <= 0) {
+        return;
+    }
+    start_frame = ctc_decoder_c_peek_first_hyp_start_frame(state);
+    if (start_frame >= 0 && (next_frame_index - start_frame) > state->config.max_frames) {
+        ctc_decoder_c_reset_beam_search(state);
+    }
+}
+
 CTCDecoderCDetectionResult ctc_decoder_c_step_and_detect(
     CTCDecoderCState* state,
     int32_t frame_index,
     const float* probs,
     int32_t vocab_size,
     int32_t disable_threshold) {
+    CTCDecoderCDetectionResult result;
     if (ctc_decoder_c_advance_frame(state, frame_index, probs, vocab_size) != 0) {
-        CTCDecoderCDetectionResult result;
-        result.word_index = -1;
-        result.keyword = NULL;
-        result.score = 0.0;
-        result.start_frame = 0;
-        result.end_frame = 0;
-        result.valid = 0;
-        return result;
+        return ctc_decoder_c_invalid_detection_result();
     }
-    return ctc_decoder_c_execute_detection(state, disable_threshold);
+    result = ctc_decoder_c_execute_detection(state, disable_threshold);
+    ctc_decoder_c_maybe_reset_stale_beam(state, frame_index + state->config.frame_step);
+    return result;
+}
+
+CTCDecoderCDetectionResult ctc_decoder_c_step_and_detect_next(
+    CTCDecoderCState* state,
+    const float* probs,
+    int32_t vocab_size,
+    int32_t disable_threshold) {
+    CTCDecoderCDetectionResult result;
+    int32_t frame_index;
+    if (!state) {
+        return ctc_decoder_c_invalid_detection_result();
+    }
+    frame_index = state->next_frame_index;
+    if (ctc_decoder_c_advance_frame(state, frame_index, probs, vocab_size) != 0) {
+        return ctc_decoder_c_invalid_detection_result();
+    }
+    result = ctc_decoder_c_execute_detection(state, disable_threshold);
+    state->next_frame_index += state->config.frame_step;
+    ctc_decoder_c_maybe_reset_stale_beam(state, state->next_frame_index);
+    return result;
 }
 
 void ctc_decoder_c_reset(CTCDecoderCState* state) {
@@ -884,11 +940,14 @@ void ctc_decoder_c_reset(CTCDecoderCState* state) {
     }
     ctc_decoder_c_init_beam_state(state);
     state->last_active_pos = -1;
+    state->next_frame_index = 0;
+#if CTC_DECODER_C_ENABLE_EXTENDED_API
     state->has_best_decode = 0;
     state->best_word_index = -1;
     state->best_score = 0.0;
     state->best_start_frame = 0;
     state->best_end_frame = 0;
+#endif
 }
 
 void ctc_decoder_c_reset_beam_search(CTCDecoderCState* state) {
@@ -898,6 +957,7 @@ void ctc_decoder_c_reset_beam_search(CTCDecoderCState* state) {
     ctc_decoder_c_init_beam_state(state);
 }
 
+#if CTC_DECODER_C_ENABLE_EXTENDED_API
 CTCDecoderCBestDecodeResult ctc_decoder_c_get_best_decode(const CTCDecoderCState* state) {
     CTCDecoderCBestDecodeResult result;
     result.word_index = -1;
@@ -921,11 +981,9 @@ CTCDecoderCBestDecodeResult ctc_decoder_c_get_best_decode(const CTCDecoderCState
 }
 
 int32_t ctc_decoder_c_get_first_hyp_start_frame(const CTCDecoderCState* state) {
-    if (!state || state->cur_hyp_count <= 0 || state->cur_hyps[0].node_count <= 0) {
-        return -1;
-    }
-    return state->node_pool[state->cur_hyps[0].node_refs[0]].frame;
+    return ctc_decoder_c_peek_first_hyp_start_frame(state);
 }
+#endif
 
 int32_t ctc_decoder_c_num_hypotheses(const CTCDecoderCState* state) {
     if (!state) {
@@ -934,8 +992,9 @@ int32_t ctc_decoder_c_num_hypotheses(const CTCDecoderCState* state) {
     return state->cur_hyp_count;
 }
 
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
 const CTCDecoderCHypothesis* ctc_decoder_c_get_hypothesis(const CTCDecoderCState* state, int32_t index) {
-    if (!state || index < 0 || index >= state->cur_hyp_count || !state->config.enable_debug_hypotheses) {
+    if (!state || index < 0 || index >= state->cur_hyp_count) {
         return NULL;
     }
     if (ctc_decoder_c_materialize_hypothesis((CTCDecoderCState*)state, &((CTCDecoderCState*)state)->cur_hyps[index]) != 0) {
@@ -943,3 +1002,4 @@ const CTCDecoderCHypothesis* ctc_decoder_c_get_hypothesis(const CTCDecoderCState
     }
     return &state->cur_hyps[index];
 }
+#endif
