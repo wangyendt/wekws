@@ -1,4 +1,4 @@
-# CTC Decoder 流式唤醒检测器 — 堆内存分析与极限压缩方案
+# CTC Decoder 流式唤醒检测器 — 堆内存分析、压缩方案与当前结论
 
 > 项目: wekws_baseline / examples/hi_xiaowen/s0/torch2lite
 > 文件: `ctc_decoder_c.h`, `ctc_decoder_c.cc`, `ctc_decoder_c_demo.c`
@@ -208,3 +208,118 @@ Np = 10×(2+1) = 30
 - 原因：`max_prefix_len=314` 是为通用 ASR 设计的（前缀=完整转录），KWS 场景下前缀最多十几个 token，314 是数量级的浪费
 
 如需进一步压到 ~96KB，方案 B（P=10）也基本安全，但建议用真实测试集验证。
+
+## 9. 2026-03-25 修订结论（基于当前 190KB 代码）
+
+本节结论覆盖上文中“方案 B 基本安全”这一类探索性表述，原因是后续已经基于真实代码路径补做了更严格的 smoke 对比。
+
+### 9.1 当前仓库基线
+
+当前源码已回到提交 `0c2b044`，也就是：
+
+- Level 1 安全复用已生效
+- `max_prefix_len = 64` 已生效
+- `path_beam_size = 20`
+- `score_beam_size = 3`
+
+对应内存约为：
+
+- decoder heap: `195,320 B`（约 `190.74 KiB`）
+- 若连 demo 的 keyword/threshold 小块一起算：`195,472 B`（约 `190.89 KiB`）
+
+### 9.2 基于当前 190KB 版本，真正“无损”的优化空间
+
+这里的“无损”指：
+
+- 不改变 beam search 搜索空间
+- 不改变在线检测语义
+- 不引入可观测的检测结果分叉
+
+按收益排序，当前最值得做的有两类。
+
+#### 9.2.1 最大的通用无损空间：去掉常驻 `hyp->nodes` 物化缓存，改成懒物化
+
+当前代码固定分配了两块物化节点缓存：
+
+- `cur_node_storage`
+- `next_node_storage`
+
+在当前 `P=20, M=64` 下，它们一共占：
+
+- `15,360 + 61,440 = 76,800 B`
+
+但在线唤醒主路径并不依赖这两块：
+
+- 检测逻辑直接读取 `node_pool[hyp->node_refs[i]]`
+- `get_best_decode()` 不依赖 `hyp->nodes`
+- 真正会触发物化的，是 `ctc_decoder_c_get_hypothesis()` / pybind `get_hypotheses()` 这类调试与对齐接口
+
+因此，更合理的实现是：
+
+- 默认不分配 `cur_node_storage/next_node_storage`
+- 仅在第一次调用 `get_hypothesis/get_hypotheses` 时，再临时分配并物化
+
+这样做的收益是：
+
+- decoder heap: `195,320 B -> 118,520 B`
+- 节省 `76,800 B`（约 `75.0 KiB`）
+
+这一步对在线检测结果可视为真正无损，代价只是调试接口从“常驻缓存”改成“按需构造”。
+
+#### 9.2.2 项目绑定的无损空间：内部存储类型窄化
+
+如果 decoder 只服务当前 hi_xiaowen 场景，而不是继续追求通用性，还可以进一步压：
+
+1. `prefix_storage`: `int32_t -> uint16_t`
+2. `node_ref_storage`: `int32_t -> uint16_t`
+3. `CTCDecoderCTokenNode` 中的 `token/frame`: `int32_t -> uint16_t`
+
+原因是当前上界非常小：
+
+- token id 远小于 `65535`
+- `node_pool_capacity = Np * M = 80 * 64 = 5120`
+- `frame` 在当前配置下也远小于 `65535`
+
+这类改动的收益量级大致是：
+
+- `prefix_storage` 窄化：约省 `12.8 KiB`
+- `node_ref_storage` 窄化：约省 `12.8 KiB`
+- `token/frame` 窄化：还能继续省一截
+
+但这类优化只对当前项目可视为无损，不再是“通用 C decoder 无损”。后续如果扩大词表、扩大帧范围、复用到其他模型，就必须重新审边界。
+
+### 9.3 哪些量不应再称为“无损”
+
+以下项目虽然还能继续降内存，但不应再归类为严格无损：
+
+- `path_beam_size`
+- `score_beam_size`
+- `max_prefix_len`
+
+原因：
+
+- `path_beam_size` / `score_beam_size` 直接改变 beam search 搜索空间
+- `max_prefix_len` 改变单条 prefix 的可达长度上限
+
+特别是 `P=10` 这条路，虽然理论内存能到约 `96KB`，但后续用真实代码路径做的 1500 条 mixed smoke 已经出现可观测分叉，因此它更适合归类为“有风险的进一步压缩”，而不是“无损优化”。
+
+### 9.4 更新后的建议顺序
+
+如果目标是继续压内存，但不接受精度或行为风险，建议顺序如下：
+
+1. 先做 `hyp->nodes` 常驻缓存懒分配
+2. 如果还不够，再做 16-bit 内部存储窄化，并把边界检查写死
+3. 只有在前两步仍不够时，才去碰 `path_beam_size / score_beam_size / max_prefix_len`
+
+### 9.5 当前最终判断
+
+基于当前 190KB 版本，仍存在一块很可观的、真正无损的优化空间：
+
+- 首选目标是去掉常驻 `cur_node_storage/next_node_storage`
+- 理论上可直接把 decoder heap 从约 `190.74 KiB` 压到约 `115.74 KiB`
+- 若再叠加项目绑定的 16-bit 存储窄化，还能继续往下走
+
+换句话说：
+
+- `190KB -> 118KB` 这一步，有希望做到真正无损
+- `190KB -> 96KB` 这一步，不能再简单表述为无损或近乎无损默认方案
