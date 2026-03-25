@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <limits.h>
 
 #ifndef CTC_DECODER_C_ENABLE_EXTENDED_API
 #define CTC_DECODER_C_ENABLE_EXTENDED_API 1
@@ -16,6 +17,13 @@
 extern "C" {
 #endif
 
+typedef uint16_t CTCDecoderCPrefixToken;
+typedef uint16_t CTCDecoderCNodeRef;
+
+#ifndef CTC_DECODER_C_INVALID_NODE_REF
+#define CTC_DECODER_C_INVALID_NODE_REF UINT16_MAX
+#endif
+
 typedef struct {
     int32_t token;
     int32_t frame;
@@ -23,14 +31,14 @@ typedef struct {
 } CTCDecoderCTokenNode;
 
 typedef struct {
-    int32_t* prefix;
+    CTCDecoderCPrefixToken* prefix;
     int32_t prefix_len;
     double pb;
     double pnb;
 #if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
     CTCDecoderCTokenNode* nodes;
 #endif
-    int32_t* node_refs;
+    CTCDecoderCNodeRef* node_refs;
     int32_t node_count;
 } CTCDecoderCHypothesis;
 
@@ -83,21 +91,21 @@ typedef struct {
     int32_t cur_hyp_capacity;
     int32_t next_hyp_capacity;
 
-    int32_t* cur_prefix_storage;
-    int32_t* next_prefix_storage;
+    CTCDecoderCPrefixToken* cur_prefix_storage;
+    CTCDecoderCPrefixToken* next_prefix_storage;
 #if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
     CTCDecoderCTokenNode* cur_node_storage;
 #endif
-    int32_t* cur_node_ref_storage;
-    int32_t* next_node_ref_storage;
+    CTCDecoderCNodeRef* cur_node_ref_storage;
+    CTCDecoderCNodeRef* next_node_ref_storage;
 
     float* topk_probs;
     int32_t* topk_indices;
     int32_t topk_capacity;
-    int32_t* temp_prefix;
+    CTCDecoderCPrefixToken* temp_prefix;
 
     CTCDecoderCTokenNode* node_pool;
-    int32_t* node_ref_remap;
+    CTCDecoderCNodeRef* node_ref_remap;
     int32_t node_pool_capacity;
     int32_t node_pool_size;
 
