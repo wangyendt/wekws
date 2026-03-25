@@ -505,7 +505,7 @@ def test_c_style_matches_cpp_multi_frame():
     }
     keywords_idxset = {0, 5, 10, 12, 15, 20}
     decoder_cpp = StreamingCTCDecoder(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10)
-    decoder_c = StreamingCTCDecoderC(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10)
+    decoder_c = StreamingCTCDecoderC(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10, enable_debug_hypotheses=True)
     decoder_cpp.set_keywords(keywords_token, keywords_idxset)
     decoder_c.set_keywords(keywords_token, keywords_idxset)
 
@@ -544,7 +544,7 @@ def test_c_style_matches_cpp_reset_and_detection():
     threshold_map = {"嗨小问": 0.1}
 
     decoder_cpp = StreamingCTCDecoder(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10)
-    decoder_c = StreamingCTCDecoderC(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10)
+    decoder_c = StreamingCTCDecoderC(score_beam_size=3, path_beam_size=20, min_frames=2, max_frames=100, interval_frames=10, enable_debug_hypotheses=True)
     decoder_cpp.set_keywords(keywords_token, keywords_idxset)
     decoder_c.set_keywords(keywords_token, keywords_idxset)
     decoder_cpp.set_thresholds(threshold_map)

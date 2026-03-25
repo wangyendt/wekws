@@ -43,6 +43,7 @@ class StreamingCTCDecoderC:
         min_frames: int = 5,
         max_frames: int = 250,
         interval_frames: int = 50,
+        enable_debug_hypotheses: bool = False,
     ) -> None:
         self._decoder = _load_extension().StreamingCTCDecoderCStyle(
             score_beam_size,
@@ -50,6 +51,7 @@ class StreamingCTCDecoderC:
             min_frames,
             max_frames,
             interval_frames,
+            enable_debug_hypotheses,
         )
         self._keyword_strings: List[str] = []
         self._keyword_to_idx: Dict[str, int] = {}

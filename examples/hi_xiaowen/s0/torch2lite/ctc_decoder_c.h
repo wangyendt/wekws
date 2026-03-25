@@ -37,6 +37,7 @@ typedef struct {
     int32_t max_frames;
     int32_t interval_frames;
     int32_t max_prefix_len;
+    int32_t enable_debug_hypotheses;
 } CTCDecoderCConfig;
 
 typedef struct {
@@ -75,7 +76,6 @@ typedef struct {
     int32_t* cur_prefix_storage;
     int32_t* next_prefix_storage;
     CTCDecoderCTokenNode* cur_node_storage;
-    CTCDecoderCTokenNode* next_node_storage;
     int32_t* cur_node_ref_storage;
     int32_t* next_node_ref_storage;
 
@@ -85,7 +85,6 @@ typedef struct {
     int32_t* temp_prefix;
 
     CTCDecoderCTokenNode* node_pool;
-    CTCDecoderCTokenNode* node_pool_tmp;
     int32_t* node_ref_remap;
     int32_t node_pool_capacity;
     int32_t node_pool_size;

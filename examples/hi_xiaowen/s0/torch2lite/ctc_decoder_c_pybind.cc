@@ -34,7 +34,8 @@ public:
         int32_t path_beam_size,
         int32_t min_frames,
         int32_t max_frames,
-        int32_t interval_frames) {
+        int32_t interval_frames,
+        bool enable_debug_hypotheses) {
         CTCDecoderCConfig config;
         ctc_decoder_c_init_default_config(&config);
         config.score_beam_size = score_beam_size;
@@ -42,6 +43,7 @@ public:
         config.min_frames = min_frames;
         config.max_frames = max_frames;
         config.interval_frames = interval_frames;
+        config.enable_debug_hypotheses = enable_debug_hypotheses ? 1 : 0;
         if (ctc_decoder_c_init(&state_, &config) != 0) {
             throw std::runtime_error("failed to initialize C-style CTC decoder");
         }
@@ -167,6 +169,9 @@ public:
         hyps.reserve(hyp_count);
         for (int32_t index = 0; index < hyp_count; ++index) {
             const CTCDecoderCHypothesis* hyp = ctc_decoder_c_get_hypothesis(&state_, index);
+            if (!hyp) {
+                throw std::runtime_error("debug hypotheses are disabled; construct decoder with enable_debug_hypotheses=True");
+            }
             Hypothesis public_hyp;
             public_hyp.pb = hyp->pb;
             public_hyp.pnb = hyp->pnb;
@@ -229,12 +234,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     py::class_<StreamingCTCDecoderCStyle>(m, "StreamingCTCDecoderCStyle")
         .def(
-            py::init<int32_t, int32_t, int32_t, int32_t, int32_t>(),
+            py::init<int32_t, int32_t, int32_t, int32_t, int32_t, bool>(),
             py::arg("score_beam_size") = 3,
             py::arg("path_beam_size") = 20,
             py::arg("min_frames") = 5,
             py::arg("max_frames") = 250,
-            py::arg("interval_frames") = 50)
+            py::arg("interval_frames") = 50,
+            py::arg("enable_debug_hypotheses") = false)
         .def("set_keywords", &StreamingCTCDecoderCStyle::set_keywords, py::arg("keywords_tokens"), py::arg("keywords_idxset"), py::arg("keyword_strings"))
         .def("set_thresholds", &StreamingCTCDecoderCStyle::set_thresholds, py::arg("threshold_map"))
         .def("advance_frame", &StreamingCTCDecoderCStyle::advance_frame, py::arg("frame_index"), py::arg("probs"))

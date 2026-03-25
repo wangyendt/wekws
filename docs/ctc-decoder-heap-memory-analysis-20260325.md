@@ -209,117 +209,153 @@ Np = 10×(2+1) = 30
 
 如需进一步压到 ~96KB，方案 B（P=10）也基本安全，但建议用真实测试集验证。
 
-## 9. 2026-03-25 修订结论（基于当前 190KB 代码）
+## 9. 2026-03-25 修订结论（基于当前 online/debug 双模式实现）
 
-本节结论覆盖上文中“方案 B 基本安全”这一类探索性表述，原因是后续已经基于真实代码路径补做了更严格的 smoke 对比。
+本节覆盖上文中“懒物化（lazy allocate）仍在使用”的旧表述。当前代码已经进一步收敛为**调试模式专用 hypotheses** 设计：
 
-### 9.1 当前仓库基线
+- `online` 模式默认关闭 `get_hypothesis/get_hypotheses` 物化能力
+- `debug` 模式显式打开时，在 `init` 阶段一次性分配调试缓存
+- **不再存在运行中首次调用调试接口才补 malloc 的 lazy init 行为**
 
-当前源码已回到提交 `0c2b044`，也就是：
+### 9.1 当前实现的模式划分
 
-- Level 1 安全复用已生效
-- `max_prefix_len = 64` 已生效
-- `path_beam_size = 20`
+当前 `CTCDecoderCConfig` 新增：
+
+- `enable_debug_hypotheses = 0`：默认 online 模式
+- `enable_debug_hypotheses = 1`：显式 debug 模式
+
+两种模式的边界如下：
+
+| 模式 | `get_hypothesis/get_hypotheses` | `init` 后新增分配 | 用途 |
+|---|---|---|---|
+| `online` | 不可用（直接返回失败 / 抛错） | **无** | 端侧真实唤醒检测 |
+| `debug` | 可用 | **无**（调试缓存已在 `init` 分好） | 单测、对齐、分叉排查 |
+
+也就是说，当前实现已经满足：
+
+- `ctc_decoder_c_init()` 完成后，逐帧 `advance_frame / execute_detection / get_best_decode / reset_beam_search` 路径不再触发新增堆分配
+- `set_keywords()` / `set_thresholds()` 仍然属于初始化/配置阶段，会为关键词与阈值表分配存储，但这不属于运行期逐帧检测内存增长
+
+### 9.2 当前两档内存
+
+#### 9.2.1 Online 模式（关闭调试）
+
+配置：
+
 - `score_beam_size = 3`
+- `path_beam_size = 20`
+- `max_prefix_len = 64`
+- `enable_debug_hypotheses = 0`
 
-对应内存约为：
+对应内存：
 
-- decoder heap: `195,320 B`（约 `190.74 KiB`）
-- 若连 demo 的 keyword/threshold 小块一起算：`195,472 B`（约 `190.89 KiB`）
+- decoder heap: `118,520 B`（约 `115.74 KiB`）
+- 若连 demo 的 keyword/threshold 小块一起算：`118,672 B`（约 `115.89 KiB`）
 
-### 9.2 基于当前 190KB 版本，真正“无损”的优化空间
+#### 9.2.2 Debug 模式（打开调试 hypotheses）
 
-这里的“无损”指：
+在 online 模式基础上，`init` 时额外分配：
 
-- 不改变 beam search 搜索空间
-- 不改变在线检测语义
-- 不引入可观测的检测结果分叉
+- `cur_node_storage = 15,360 B`
 
-按收益排序，当前最值得做的有两类。
+因此：
 
-#### 9.2.1 最大的通用无损空间：去掉常驻 `hyp->nodes` 物化缓存，改成懒物化
+- decoder heap: `133,880 B`（约 `130.74 KiB`）
+- 若连 demo 的 keyword/threshold 小块一起算：`134,032 B`（约 `130.89 KiB`）
 
-当前代码固定分配了两块物化节点缓存：
+### 9.3 190KB → 130KB → 118KB 分别去掉了什么
 
-- `cur_node_storage`
-- `next_node_storage`
+这一轮压缩现在可以拆成两步看。
 
-在当前 `P=20, M=64` 下，它们一共占：
+#### 9.3.1 190KB → 130KB：去掉 `next_node_storage`
 
-- `15,360 + 61,440 = 76,800 B`
+旧的 190KB 版本（`P=20, M=64`）里，常驻物化节点缓存有两块：
 
-但在线唤醒主路径并不依赖这两块：
+- `cur_node_storage = 15,360 B`
+- `next_node_storage = 61,440 B`
 
-- 检测逻辑直接读取 `node_pool[hyp->node_refs[i]]`
-- `get_best_decode()` 不依赖 `hyp->nodes`
-- 真正会触发物化的，是 `ctc_decoder_c_get_hypothesis()` / pybind `get_hypotheses()` 这类调试与对齐接口
+当前 debug 模式只保留：
 
-因此，更合理的实现是：
+- `cur_node_storage = 15,360 B`
 
-- 默认不分配 `cur_node_storage/next_node_storage`
-- 仅在第一次调用 `get_hypothesis/get_hypotheses` 时，再临时分配并物化
+不再保留：
 
-这样做的收益是：
+- `next_node_storage = 61,440 B`
 
-- decoder heap: `195,320 B -> 118,520 B`
-- 节省 `76,800 B`（约 `75.0 KiB`）
+因此：
 
-这一步对在线检测结果可视为真正无损，代价只是调试接口从“常驻缓存”改成“按需构造”。
+- `195,320 B -> 133,880 B`
+- 节省 `61,440 B`
 
-#### 9.2.2 项目绑定的无损空间：内部存储类型窄化
+这一步本质上是：
 
-如果 decoder 只服务当前 hi_xiaowen 场景，而不是继续追求通用性，还可以进一步压：
+- 保留调试所需的当前帧 hypotheses 物化缓存
+- 去掉 next hypotheses 的常驻物化缓存
 
-1. `prefix_storage`: `int32_t -> uint16_t`
-2. `node_ref_storage`: `int32_t -> uint16_t`
-3. `CTCDecoderCTokenNode` 中的 `token/frame`: `int32_t -> uint16_t`
+#### 9.3.2 130KB → 118KB：关闭 `cur_node_storage`
 
-原因是当前上界非常小：
+在 debug 模式基础上，如果进一步切到纯 online 模式，则还能去掉：
 
-- token id 远小于 `65535`
-- `node_pool_capacity = Np * M = 80 * 64 = 5120`
-- `frame` 在当前配置下也远小于 `65535`
+- `cur_node_storage = 15,360 B`
 
-这类改动的收益量级大致是：
+因此：
 
-- `prefix_storage` 窄化：约省 `12.8 KiB`
-- `node_ref_storage` 窄化：约省 `12.8 KiB`
-- `token/frame` 窄化：还能继续省一截
+- `133,880 B -> 118,520 B`
+- 再节省 `15,360 B`
 
-但这类优化只对当前项目可视为无损，不再是“通用 C decoder 无损”。后续如果扩大词表、扩大帧范围、复用到其他模型，就必须重新审边界。
+所以最终关系非常直接：
 
-### 9.3 哪些量不应再称为“无损”
+- **190KB -> 130KB**：去掉 `next_node_storage`
+- **130KB -> 118KB**：再去掉 `cur_node_storage`
 
-以下项目虽然还能继续降内存，但不应再归类为严格无损：
+### 9.4 当前 online 模式下，哪些内存仍然是大头
 
-- `path_beam_size`
-- `score_beam_size`
-- `max_prefix_len`
+在 `online` 模式下，主要常驻内存户已经变成：
 
-原因：
+| 分配项 | 字节数 | 说明 |
+|---|---|---|
+| `node_pool` | `61,440 B` | 当前最大的在线必需内存 |
+| `next_prefix_storage` | `20,480 B` | next beam 前缀 token |
+| `next_node_ref_storage` | `20,480 B` | next beam node 引用，同时兼作 remap 区 |
+| `cur_prefix_storage` | `5,120 B` | current beam 前缀 token |
+| `cur_node_ref_storage` | `5,120 B` | current beam node 引用 |
+| `cur_hyps + next_hyps + topk/temp_prefix` | `5,880 B` | 小头 |
 
-- `path_beam_size` / `score_beam_size` 直接改变 beam search 搜索空间
-- `max_prefix_len` 改变单条 prefix 的可达长度上限
+也就是说，真正还值得继续压的 online 内存，已经主要集中在：
 
-特别是 `P=10` 这条路，虽然理论内存能到约 `96KB`，但后续用真实代码路径做的 1500 条 mixed smoke 已经出现可观测分叉，因此它更适合归类为“有风险的进一步压缩”，而不是“无损优化”。
+1. `node_pool`
+2. `next_prefix_storage`
+3. `next_node_ref_storage`
 
-### 9.4 更新后的建议顺序
+调试缓存已经不是大头，且已经被模式化隔离。
 
-如果目标是继续压内存，但不接受精度或行为风险，建议顺序如下：
+### 9.5 当前设计的副作用与取舍
 
-1. 先做 `hyp->nodes` 常驻缓存懒分配
-2. 如果还不够，再做 16-bit 内部存储窄化，并把边界检查写死
-3. 只有在前两步仍不够时，才去碰 `path_beam_size / score_beam_size / max_prefix_len`
+当前版本相较于旧 190KB 版本，关键取舍是：
 
-### 9.5 当前最终判断
+- 优点：online 模式 `init` 后不再有 hypotheses 相关的新增分配，更适合端侧“初始化后禁止动态分配”的约束
+- 优点：调试模式仍保留 `get_hypothesis/get_hypotheses`，单测和对齐工具不需要重写
+- 代价：如果需要调试 hypotheses，必须显式打开 `enable_debug_hypotheses`，并接受多出约 `15 KiB` 的常驻内存
 
-基于当前 190KB 版本，仍存在一块很可观的、真正无损的优化空间：
+因此，当前推荐使用方式是：
 
-- 首选目标是去掉常驻 `cur_node_storage/next_node_storage`
-- 理论上可直接把 decoder heap 从约 `190.74 KiB` 压到约 `115.74 KiB`
-- 若再叠加项目绑定的 16-bit 存储窄化，还能继续往下走
+- 端侧 release：`enable_debug_hypotheses = 0`
+- 本地验证/对齐/排障：`enable_debug_hypotheses = 1`
+
+### 9.6 当前最终判断
+
+截至当前实现，结论应更新为：
+
+- **已经没有 lazy init**
+- 已经形成清晰的 `online/debug` 双模式边界
+- `online` 模式下，decoder heap 已稳定收敛到约 **115.74 KiB**
+- `debug` 模式下，decoder heap 为约 **130.74 KiB**
+- 相对原始 190KB 版本，当前压缩的本质来源是：
+  - 去掉 `next_node_storage`
+  - 并在 online 模式下进一步去掉 `cur_node_storage`
 
 换句话说：
 
-- `190KB -> 118KB` 这一步，有希望做到真正无损
-- `190KB -> 96KB` 这一步，不能再简单表述为无损或近乎无损默认方案
+- 若目标是端侧真实部署，应以 **118KB online 模式** 为准
+- 若目标是本地调试与 hypothesis 对齐，应以 **134KB debug 模式** 为准
+- 下一步若还要继续压缩，优先目标应转向 `node_pool / next_prefix_storage / next_node_ref_storage`，而不是再从调试缓存里找空间

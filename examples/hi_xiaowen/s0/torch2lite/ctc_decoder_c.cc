@@ -73,6 +73,7 @@ void ctc_decoder_c_init_default_config(CTCDecoderCConfig* config) {
     config->max_frames = 250;
     config->interval_frames = 50;
     config->max_prefix_len = 0;
+    config->enable_debug_hypotheses = 0;
 }
 
 static int32_t ctc_decoder_c_resolve_max_prefix_len(const CTCDecoderCConfig* config) {
@@ -109,9 +110,12 @@ static void ctc_decoder_c_bind_hypothesis_storage(
     }
 }
 
-static int32_t ctc_decoder_c_ensure_current_node_storage(CTCDecoderCState* state) {
+static int32_t ctc_decoder_c_enable_debug_hypotheses(CTCDecoderCState* state) {
     int32_t index;
     ptrdiff_t node_slots;
+    if (!state->config.enable_debug_hypotheses) {
+        return 0;
+    }
     if (state->cur_node_storage) {
         return 0;
     }
@@ -134,7 +138,7 @@ static int32_t ctc_decoder_c_materialize_hypothesis(
     CTCDecoderCState* state,
     CTCDecoderCHypothesis* hyp) {
     int32_t index;
-    if (ctc_decoder_c_ensure_current_node_storage(state) != 0) {
+    if (!state->config.enable_debug_hypotheses || !state->cur_node_storage) {
         return -1;
     }
     for (index = 0; index < hyp->node_count; ++index) {
@@ -507,6 +511,10 @@ int32_t ctc_decoder_c_init_with_allocator(
 
     ctc_decoder_c_bind_hypothesis_storage(state->cur_hyps, state->cur_hyp_capacity, state->cur_prefix_storage, NULL, state->cur_node_ref_storage, max_prefix_len);
     ctc_decoder_c_bind_hypothesis_storage(state->next_hyps, state->next_hyp_capacity, state->next_prefix_storage, NULL, state->next_node_ref_storage, max_prefix_len);
+    if (ctc_decoder_c_enable_debug_hypotheses(state) != 0) {
+        ctc_decoder_c_free(state);
+        return -1;
+    }
     ctc_decoder_c_init_beam_state(state);
     return 0;
 }
@@ -927,7 +935,7 @@ int32_t ctc_decoder_c_num_hypotheses(const CTCDecoderCState* state) {
 }
 
 const CTCDecoderCHypothesis* ctc_decoder_c_get_hypothesis(const CTCDecoderCState* state, int32_t index) {
-    if (!state || index < 0 || index >= state->cur_hyp_count) {
+    if (!state || index < 0 || index >= state->cur_hyp_count || !state->config.enable_debug_hypotheses) {
         return NULL;
     }
     if (ctc_decoder_c_materialize_hypothesis((CTCDecoderCState*)state, &((CTCDecoderCState*)state)->cur_hyps[index]) != 0) {
