@@ -1,6 +1,6 @@
 # hi_xiaowen 实验记录
 
-> **维护说明**：基线内容截至 **2026-03-02**；**2026-03-23** 起增补 **LiteRT 流式 TFLite** 与 **`evaluate_infer_wav` 全量索引**；**2026-03-24** 起补充 **真流式 decoder（Python / C++ pybind）** 对齐结论，并澄清旧 `test_infer_stream_*` 的后处理口径；**2026-03-25** 起补充 **C decoder lazy-node 内存压缩** 的全量回归，确认当前实现无精度回退；**2026-03-26** 起补充 **72KB 纯在线窄化版** 的全量回归与根因定位。  
+> **维护说明**：基线内容截至 **2026-03-02**；**2026-03-23** 起增补 **LiteRT 流式 TFLite** 与 **`evaluate_infer_wav` 全量索引**；**2026-03-24** 起补充 **真流式 decoder（Python / C++ pybind）** 对齐结论，并澄清旧 `test_infer_stream_*` 的后处理口径；**2026-03-25** 起补充 **C decoder lazy-node 内存压缩** 的全量回归，确认当前实现无精度回退；**2026-03-26** 起补充 **72KB / 55KB 纯在线窄化版** 的全量回归与根因定位。  
 > **路径约定**：未写绝对路径时，均相对仓库内 `examples/hi_xiaowen/s0/`。
 
 ---
@@ -29,6 +29,7 @@
 | **蒸馏 v3 merged（S3）** | **~74K** | test_399 你 97.66% / 嗨 96.75% | 当前 **精度–参数** 较好折中 |
 | **S3 真流式后处理（Py / C++ / C / lazy-node C）** | **~74K** | `test_infer_stream_399_{py,cpp,c}_post` 与 `test_infer_stream_399_c_post_lazy_nodes`：你 **97.51%** / 嗨 **96.44%** | **Python / C++ / C 风格 pybind 全量一致**；`lazy-node` 压缩版与旧 `c_post` 全量一致，较旧流式口径略降 |
 | **S3 真流式后处理（C decoder 72KB 版）** | **decoder heap ~72KB** | `test_infer_stream_399_c_post_72k`：你 **97.48%** / 嗨 **96.42%** | 相对磁盘上的 `lazy_nodes` 目录有轻微回退，但需结合当前代码口径重新判断 |
+| **S3 真流式后处理（C decoder P=16 / 55KB 版）** | **decoder heap ~56KB** | `test_infer_stream_399_c_post_p16_55k`：你 **97.48%** / 嗨 **96.45%** | **P=16 + 关闭 debug hypotheses** 全量指标与 `P=16` 默认构建一致，当前未见回退 |
 | **INT8 PTQ（Torch/离线）** | 位数 ↓ | 229 → 229_int8 **轻微掉点** | 可接受 |
 | **LiteRT 流式 FP32（S3）** | TFLite step | 与离线 infer **同量级** | 导出链路对齐好 |
 | **LiteRT 流式 INT8（S3）** | 同上 | 相对 FP32 **明显回退** | 需继续优化 PTQ/校准等 |
@@ -75,6 +76,8 @@
 | `test_infer_stream_399_c_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_c_ctc_prefix_beam`，与 Python / C++ 全量一致 |
 | `test_infer_stream_399_c_post_lazy_nodes` | `…/399.pt` | 是 | 多 GPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_c_ctc_prefix_beam` 的 lazy-node 内存压缩版；与旧 `c_post` 全量一致 |
 | `test_infer_stream_399_c_post_72k` | `…/399.pt` | 是 | 多 GPU | **96.42%** | **97.48%** | ⚠️ **真流式后处理**：72KB 纯在线窄化版；相对磁盘上的 `lazy_nodes` 结果略低 |
+| `test_infer_stream_399_c_post_p16` | `…/399.pt` | 是 | 多 GPU | **96.45%** | **97.48%** | ✅ **真流式后处理**：`P=16`；相对当前 `default C` summary 未见回退 |
+| `test_infer_stream_399_c_post_p16_55k` | `…/399.pt` | 是 | 多 GPU | **96.45%** | **97.48%** | ✅ **真流式后处理**：`P=16 + DEBUG_HYPOTHESES=0`；与 `p16` 逐条一致 |
 | `test_infer_stream_399_tflite` | `…/399_stream_litert_fp32.tflite` | 是 | CPU | **96.75%** | **97.66%** | ✅ **旧口径**：流式前端 + `offline_ctc_prefix_beam` |
 | `test_infer_stream_399_tflite_int8` | `…/399_stream_litert_int8.tflite` | 是 | CPU | **91.39%** | **94.00%** | ✅ |
 | `test_infer_stream_399_tflite_native_int8_calib200` | `…/399_stream_native_int8_calib200.tflite` | 是 | CPU | **94.66%** | **97.06%** | ✅ |
@@ -126,6 +129,13 @@
 - 因而 root cause 可以继续收口到更早的代码变化：`489429b torch2lite: internalize streaming decoder reset and fix frame timing`。其中真正影响检测行为的部分不是时间字段换算，而是 **把 stale reset 从 Python chunk 尾部外部判断，改成了 C decoder 在 `step_and_detect_next()` 里的逐帧内部判断**。
 - 具体差异是：当前 C decoder 在处理完每一帧后，都会立刻按 `next_frame_index - first_hyp_start_frame > max_frames` 判断是否 reset；Python/reference 路径则是在整块 `forward_chunk()` 完成后才按 `self.total_frames - start > self.max_frames` 做一次外部 reset。对于 `start_frame=3`、`frame_step=3` 的长尾样本，C decoder 会在进入 `255` 这一帧之前 reset，而 Python 路径还能继续保留同一条候选到 `255/258/261/...` 并更新 `best_decode_result`。
 - 当前最终结论应修正为：相对旧的 `lazy_nodes` 磁盘基线，今天看到的差异**主要不是 72KB 窄化引入的**，而是 **`489429b` 这轮 stale reset 内收后，C decoder 与 Python/旧评测口径发生了语义变化**。如果要恢复到旧 `lazy_nodes` 结果，优先应排查和调整的不是 16 位 `frame`，而是 stale reset 的时机与作用范围。
+
+**2026-03-26：C decoder P=16 / 55KB 全量回归**
+
+- 新目录：`test_infer_stream_399_c_post_p16` 与 `test_infer_stream_399_c_post_p16_55k`。前者只把 `path_beam_size` 从 `20` 收到 `16`；后者在此基础上再加 `HI_XIAOWEN_CTC_DECODER_C_EXTRA_CFLAGS="-DCTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES=0"`，对应约 **55.9 KiB** 的 pure-online decoder core heap。
+- `test_infer_stream_399_c_post_p16` 的全量结果：嗨小问 `threshold=0.291, accuracy=96.45%, frr=3.55%, fa/h=0.99`；你好问问 `threshold=0.016, accuracy=97.48%, frr=2.52%, fa/h=0.47`。相对当前 `test_infer_stream_399_c_post_current_default`（P=20），summary 未见回退。
+- `test_infer_stream_399_c_post_p16_55k` 的全量 `summary.json` 与 `p16` **完全一致**；进一步核对 artifacts，`results.jsonl` 都是 `d06b6f7ab480d06649845b50029ca3764eaf50cb0f8e03977fa849e787cd6069`，`score.txt` 都是 `550d21a8ac042ffa6f11c373b801f0c1bc78ab39566e7d45b3302c4ff7d9ddfb`。
+- 结论：`P=16` 这一步在当前正确在线语义下，全量指标未见回退；同时 `DEBUG_HYPOTHESES=0` 在 `P=16` 这一档也没有引入任何新增差异。因此，截至 **2026-03-26**，约 **55KB** 的 pure-online C decoder 组合版已经完成全量留证。
 
 **其他**（暂无全量结果目录）
 

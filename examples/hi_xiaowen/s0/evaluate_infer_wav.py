@@ -70,6 +70,7 @@ def parse_args():
     parser.add_argument("--progress_every", type=int, default=1000, help="每处理多少条打印一次进度")
     parser.add_argument("--streaming", action="store_true", help="按流式方式评测，每条 wav 按 chunk 模拟在线输入")
     parser.add_argument("--chunk_ms", type=float, default=1000.0, help="流式评测时每次送入的音频 chunk 时长，批量评测建议 1000~2000ms")
+    parser.add_argument("--path_beam_size", type=int, default=20, help="流式评测时 prefix beam size")
     parser.add_argument("--use_cpp_decoder", action="store_true", help="流式评测时使用 C++ pybind beam search / keyword detection")
     parser.add_argument("--use_c_decoder", action="store_true", help="流式评测时使用 C 风格 pybind beam search / keyword detection")
     parser.add_argument("--indent", type=int, default=2, help="JSON 缩进空格数")
@@ -307,7 +308,7 @@ def worker_eval(
                     keywords_idxset=keywords_idxset,
                     threshold_map=threshold_map,
                     score_beam_size=3,
-                    path_beam_size=20,
+                    path_beam_size=args.path_beam_size,
                     min_frames=5,
                     max_frames=250,
                     interval_frames=50,
