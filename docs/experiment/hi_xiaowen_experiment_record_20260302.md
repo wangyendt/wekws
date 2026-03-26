@@ -1,6 +1,6 @@
 # hi_xiaowen 实验记录
 
-> **维护说明**：基线内容截至 **2026-03-02**；**2026-03-23** 起增补 **LiteRT 流式 TFLite** 与 **`evaluate_infer_wav` 全量索引**；**2026-03-24** 起补充 **真流式 decoder（Python / C++ pybind）** 对齐结论，并澄清旧 `test_infer_stream_*` 的后处理口径；**2026-03-25** 起补充 **C decoder lazy-node 内存压缩** 的全量回归，确认当前实现无精度回退。  
+> **维护说明**：基线内容截至 **2026-03-02**；**2026-03-23** 起增补 **LiteRT 流式 TFLite** 与 **`evaluate_infer_wav` 全量索引**；**2026-03-24** 起补充 **真流式 decoder（Python / C++ pybind）** 对齐结论，并澄清旧 `test_infer_stream_*` 的后处理口径；**2026-03-25** 起补充 **C decoder lazy-node 内存压缩** 的全量回归，确认当前实现无精度回退；**2026-03-26** 起补充 **72KB 纯在线窄化版** 的全量回归与根因定位。  
 > **路径约定**：未写绝对路径时，均相对仓库内 `examples/hi_xiaowen/s0/`。
 
 ---
@@ -28,6 +28,7 @@
 | **知识蒸馏（199K）** | **~200K** | test_229 约 **98%** | 可行，训练与超参敏感 |
 | **蒸馏 v3 merged（S3）** | **~74K** | test_399 你 97.66% / 嗨 96.75% | 当前 **精度–参数** 较好折中 |
 | **S3 真流式后处理（Py / C++ / C / lazy-node C）** | **~74K** | `test_infer_stream_399_{py,cpp,c}_post` 与 `test_infer_stream_399_c_post_lazy_nodes`：你 **97.51%** / 嗨 **96.44%** | **Python / C++ / C 风格 pybind 全量一致**；`lazy-node` 压缩版与旧 `c_post` 全量一致，较旧流式口径略降 |
+| **S3 真流式后处理（C decoder 72KB 版）** | **decoder heap ~72KB** | `test_infer_stream_399_c_post_72k`：你 **97.48%** / 嗨 **96.42%** | 相对磁盘上的 `lazy_nodes` 目录有轻微回退，但需结合当前代码口径重新判断 |
 | **INT8 PTQ（Torch/离线）** | 位数 ↓ | 229 → 229_int8 **轻微掉点** | 可接受 |
 | **LiteRT 流式 FP32（S3）** | TFLite step | 与离线 infer **同量级** | 导出链路对齐好 |
 | **LiteRT 流式 INT8（S3）** | 同上 | 相对 FP32 **明显回退** | 需继续优化 PTQ/校准等 |
@@ -73,6 +74,7 @@
 | `test_infer_stream_399_cpp_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_cpp_ctc_prefix_beam`，与 Python 全量一致 |
 | `test_infer_stream_399_c_post` | `…/399.pt` | 是 | CPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_c_ctc_prefix_beam`，与 Python / C++ 全量一致 |
 | `test_infer_stream_399_c_post_lazy_nodes` | `…/399.pt` | 是 | 多 GPU | **96.44%** | **97.51%** | ✅ **真流式后处理**：`streaming_c_ctc_prefix_beam` 的 lazy-node 内存压缩版；与旧 `c_post` 全量一致 |
+| `test_infer_stream_399_c_post_72k` | `…/399.pt` | 是 | 多 GPU | **96.42%** | **97.48%** | ⚠️ **真流式后处理**：72KB 纯在线窄化版；相对磁盘上的 `lazy_nodes` 结果略低 |
 | `test_infer_stream_399_tflite` | `…/399_stream_litert_fp32.tflite` | 是 | CPU | **96.75%** | **97.66%** | ✅ **旧口径**：流式前端 + `offline_ctc_prefix_beam` |
 | `test_infer_stream_399_tflite_int8` | `…/399_stream_litert_int8.tflite` | 是 | CPU | **91.39%** | **94.00%** | ✅ |
 | `test_infer_stream_399_tflite_native_int8_calib200` | `…/399_stream_native_int8_calib200.tflite` | 是 | CPU | **94.66%** | **97.06%** | ✅ |
@@ -107,6 +109,23 @@
 - 全量 `summary.json` 与旧 `test_infer_stream_399_c_post` **完全一致**：嗨小问 `threshold=0.296, accuracy=96.44%, frr=3.56%, fa/h=0.99`；你好问问 `threshold=0.016, accuracy=97.51%, frr=2.49%, fa/h=0.50`。
 - 更强证据：两次全量评测的 `results.jsonl` 的 `sha256` 都是 `08483e0ee587ed86b422afd03b9e038d982e226ff93becd964a6b4fe483df298`，`score.txt` 的 `sha256` 都是 `e996ba54843e0d4fec0251f13f9e14e1c446cbb063acfc146a474579c3c29a42`。
 - 结论：截至 **2026-03-25**，这轮 lazy-node 内存压缩在 **73459** 条全量测试上没有观测到任何输出变化；当前证据支持它对现有 S3 真流式 C decoder 路径 **无精度回退**。
+
+**2026-03-26：C decoder 72KB 纯在线窄化版全量回归**
+
+- 新目录：`test_infer_stream_399_c_post_72k`。命令与 `lazy_nodes` 基线相比，关键差异是打开了 72KB 版 C decoder（`node_pool.token/frame` 收到 16 位，内部 duration / interval / stale reset 改成环形 frame 差值），并以 `HI_XIAOWEN_CTC_DECODER_C_EXTRA_CFLAGS="-DCTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES=0"` 重新编译加载。
+- 全量 `summary.json` 显示轻微回退：嗨小问从 `threshold=0.296, accuracy=96.44%, frr=3.56%, fa/h=0.99` 变为 `threshold=0.294, accuracy=96.42%, frr=3.58%, fa/h=0.99`；你好问问从 `threshold=0.016, accuracy=97.51%, frr=2.49%, fa/h=0.50` 变为 `threshold=0.016, accuracy=97.48%, frr=2.52%, fa/h=0.48`。
+- `results.jsonl` / `score.txt` 的 `sha256` 已变化：`lazy_nodes` 为 `08483e0ee587ed86b422afd03b9e038d982e226ff93becd964a6b4fe483df298` / `e996ba54843e0d4fec0251f13f9e14e1c446cbb063acfc146a474579c3c29a42`；`72k` 为 `ad0cdf951f480ec3c582a692ed2f6ee2660462fe6d4ecf57cee187ab7b1291c8` / `f359a589d07442bc6b333fd49f408f2986a4c23137bf0c412f77a721a92a6e8f`。
+- 但这里面有两类差异要分开看：
+  - 第一类是**预期差异**：大量 `results.jsonl` 变化仅体现在 `wake_time_sec / start_time_sec / end_time_sec`，属于此前 `frame -> sec` 修正后的时间语义变化，不代表检测结果变差。
+  - 第二类才是**真实行为分叉**：只看 `triggered / keyword / score / start_frame / end_frame` 等检测相关字段，`73459` 条里共有 **15** 条发生变化，其中 **10** 条由“原先触发”变成“现在不触发”，另有 **4** 条为同关键词但分数和结束帧轻微变化，**1** 条为未触发样本的候选分数轻微变化。
+- 这 **10** 条真实分叉高度集中在 `max_frames` 边界附近：旧结果多为 `start_frame=3`、`end_frame=255/258/261/270/273/276/279` 这类长跨度样本；72KB 版里相同样本要么被截到 `end_frame=252`，要么直接不再触发。
+- 进一步单条重放显示：这些分叉**不一定是 72KB 窄化本身引入**。以 `0a14c32716afb98ddd1296fcf072528d`、`6a04368fc74709e31ac01e31a120547b` 为例，当前 **default C decoder** 与 **72KB C decoder** 都返回“不触发”，而当前 **Python streaming** 仍返回触发，说明当前差异更像是 **C decoder 与 Python/reference 口径不一致**，而不是 `72k` 相对“当前 default C”单独恶化。
+- 更具体地说，当前 C decoder 在 `step_and_detect_next()` 中是**逐帧**调用 `ctc_decoder_c_maybe_reset_stale_beam(...)`；当首 token 在 `frame=3` 时，处理完 `frame=252` 后，下一帧索引将变成 `255`，此时 `255 - 3 = 252 > max_frames(250)`，beam 会在**进入 255 这一帧之前**被 reset。Python 路径则是在 `forward_chunk()` 的 chunk 尾部才做一次外部 stale reset，因此同类长尾候选还能继续跑到 `255/258/261/...` 并进入 `best_decode_result`。
+- 随后补跑的 `test_infer_stream_399_c_post_current_default` 与 `test_infer_stream_399_c_post_72k` 的 `summary.json` **完全一致**：嗨小问 `threshold=0.294, accuracy=96.42%, frr=3.58%, fa/h=0.99`；你好问问 `threshold=0.016, accuracy=97.48%, frr=2.52%, fa/h=0.48`。进一步核对 artifacts，`results.jsonl` 都是 `ad0cdf951f480ec3c582a692ed2f6ee2660462fe6d4ecf57cee187ab7b1291c8`，`score.txt` 都是 `f359a589d07442bc6b333fd49f408f2986a4c23137bf0c412f77a721a92a6e8f`。
+- 这意味着：`72KB` 版相对“当前 default C decoder”**没有独立增量回退**；`HI_XIAOWEN_CTC_DECODER_C_EXTRA_CFLAGS="-DCTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES=0"` 这个宏也**不是根因**。
+- 因而 root cause 可以继续收口到更早的代码变化：`489429b torch2lite: internalize streaming decoder reset and fix frame timing`。其中真正影响检测行为的部分不是时间字段换算，而是 **把 stale reset 从 Python chunk 尾部外部判断，改成了 C decoder 在 `step_and_detect_next()` 里的逐帧内部判断**。
+- 具体差异是：当前 C decoder 在处理完每一帧后，都会立刻按 `next_frame_index - first_hyp_start_frame > max_frames` 判断是否 reset；Python/reference 路径则是在整块 `forward_chunk()` 完成后才按 `self.total_frames - start > self.max_frames` 做一次外部 reset。对于 `start_frame=3`、`frame_step=3` 的长尾样本，C decoder 会在进入 `255` 这一帧之前 reset，而 Python 路径还能继续保留同一条候选到 `255/258/261/...` 并更新 `best_decode_result`。
+- 当前最终结论应修正为：相对旧的 `lazy_nodes` 磁盘基线，今天看到的差异**主要不是 72KB 窄化引入的**，而是 **`489429b` 这轮 stale reset 内收后，C decoder 与 Python/旧评测口径发生了语义变化**。如果要恢复到旧 `lazy_nodes` 结果，优先应排查和调整的不是 16 位 `frame`，而是 stale reset 的时机与作用范围。
 
 **其他**（暂无全量结果目录）
 
@@ -166,6 +185,12 @@ python ./evaluate_infer_wav.py --model s3 \
   --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt \
   --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 \
   --streaming --chunk_ms 1000 --use_c_decoder --result_test_id test_infer_stream_399_c_post
+
+HI_XIAOWEN_CTC_DECODER_C_EXTRA_CFLAGS="-DCTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES=0" \
+python ./evaluate_infer_wav.py --model s3 \
+  --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt \
+  --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 \
+  --streaming --chunk_ms 1000 --use_c_decoder --result_test_id test_infer_stream_399_c_post_72k
 
 # 流式 TFLite FP32 / INT8
 python ./evaluate_infer_wav.py --model s3 \
