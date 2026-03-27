@@ -9,6 +9,14 @@
 #define CTC_DECODER_C_DEFAULT_MAX_PREFIX_LEN 64
 #endif
 
+#ifndef CTC_DECODER_C_HEAP_ALIGNMENT
+#define CTC_DECODER_C_HEAP_ALIGNMENT 16u
+#endif
+
+typedef struct {
+    void* base_ptr;
+} CTCDecoderCAlignedAllocHeader;
+
 static void* ctc_decoder_c_default_malloc(void* user_data, size_t size) {
     (void)user_data;
     return malloc(size);
@@ -38,22 +46,64 @@ static void ctc_decoder_c_resolve_allocator(
     const CTCDecoderCAllocator* allocator,
     CTCDecoderCAllocator* resolved_allocator) {
     if (allocator && allocator->malloc_fn && allocator->calloc_fn && allocator->free_fn) {
-        *resolved_allocator = *allocator;
+        resolved_allocator->malloc_fn = allocator->malloc_fn;
+        resolved_allocator->calloc_fn = allocator->calloc_fn;
+        resolved_allocator->free_fn = allocator->free_fn;
+        resolved_allocator->user_data = allocator->user_data;
         return;
     }
     ctc_decoder_c_init_default_allocator(resolved_allocator);
+}
+
+static uintptr_t ctc_decoder_c_align_up_uintptr(uintptr_t value, size_t alignment) {
+    return (value + (uintptr_t)(alignment - 1u)) & ~(uintptr_t)(alignment - 1u);
+}
+
+static int32_t ctc_decoder_c_is_aligned_16(const void* ptr) {
+    return (((uintptr_t)ptr) & (uintptr_t)(CTC_DECODER_C_HEAP_ALIGNMENT - 1u)) == 0u;
 }
 
 static void* ctc_decoder_c_alloc_zeroed(
     const CTCDecoderCAllocator* allocator,
     size_t count,
     size_t elem_size) {
-    return allocator->calloc_fn(allocator->user_data, count, elem_size);
+    size_t payload_size;
+    size_t total_size;
+    void* raw_ptr;
+    uintptr_t aligned_addr;
+    CTCDecoderCAlignedAllocHeader* header;
+    if (!allocator || !allocator->malloc_fn) {
+        return NULL;
+    }
+    if (elem_size != 0 && count > SIZE_MAX / elem_size) {
+        return NULL;
+    }
+    payload_size = count * elem_size;
+    if (payload_size == 0) {
+        payload_size = 1;
+    }
+    if (payload_size > SIZE_MAX - (CTC_DECODER_C_HEAP_ALIGNMENT - 1u) - sizeof(CTCDecoderCAlignedAllocHeader)) {
+        return NULL;
+    }
+    total_size = payload_size + (CTC_DECODER_C_HEAP_ALIGNMENT - 1u) + sizeof(CTCDecoderCAlignedAllocHeader);
+    raw_ptr = allocator->malloc_fn(allocator->user_data, total_size);
+    if (!raw_ptr) {
+        return NULL;
+    }
+    aligned_addr = ctc_decoder_c_align_up_uintptr(
+        (uintptr_t)raw_ptr + sizeof(CTCDecoderCAlignedAllocHeader),
+        CTC_DECODER_C_HEAP_ALIGNMENT);
+    header = (CTCDecoderCAlignedAllocHeader*)(aligned_addr - sizeof(CTCDecoderCAlignedAllocHeader));
+    header->base_ptr = raw_ptr;
+    memset((void*)aligned_addr, 0, payload_size);
+    return (void*)aligned_addr;
 }
 
 static void ctc_decoder_c_release_bytes(const CTCDecoderCAllocator* allocator, void* ptr) {
     if (ptr) {
-        allocator->free_fn(allocator->user_data, ptr);
+        CTCDecoderCAlignedAllocHeader* header =
+            (CTCDecoderCAlignedAllocHeader*)((uintptr_t)ptr - sizeof(CTCDecoderCAlignedAllocHeader));
+        allocator->free_fn(allocator->user_data, header->base_ptr);
     }
 }
 
@@ -104,6 +154,9 @@ static void ctc_decoder_c_bind_hypothesis_storage(
     CTCDecoderCNodeRef* node_ref_storage,
     int32_t max_prefix_len) {
     int32_t index;
+#if !CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+    (void)node_storage;
+#endif
     for (index = 0; index < hyp_count; ++index) {
         hyps[index].prefix = prefix_storage + ((ptrdiff_t)index * max_prefix_len);
 #if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
@@ -115,6 +168,10 @@ static void ctc_decoder_c_bind_hypothesis_storage(
 }
 
 #if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+static void ctc_decoder_c_copy_node_value(
+    CTCDecoderCTokenNode* dst,
+    const CTCDecoderCTokenNode* src);
+
 static int32_t ctc_decoder_c_init_debug_hypotheses(CTCDecoderCState* state) {
     int32_t index;
     ptrdiff_t node_slots;
@@ -146,7 +203,7 @@ static int32_t ctc_decoder_c_materialize_hypothesis(
     for (index = 0; index < hyp->node_count; ++index) {
         int32_t ref = (int32_t)hyp->node_refs[index];
         if (ref >= 0 && ref < state->node_pool_size) {
-            hyp->nodes[index] = state->node_pool[ref];
+            ctc_decoder_c_copy_node_value(&hyp->nodes[index], &state->node_pool[ref]);
         }
     }
     return 0;
@@ -258,6 +315,43 @@ static int32_t ctc_decoder_c_frame_diff(CTCDecoderCNodeFrame newer, CTCDecoderCN
     return (int32_t)(CTCDecoderCNodeFrame)(newer - older);
 }
 
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+static void ctc_decoder_c_copy_node_value(
+    CTCDecoderCTokenNode* dst,
+    const CTCDecoderCTokenNode* src) {
+    dst->token = src->token;
+    dst->frame = src->frame;
+    dst->prob = src->prob;
+}
+
+#endif
+
+static void ctc_decoder_c_swap_node_value(
+    CTCDecoderCTokenNode* lhs,
+    CTCDecoderCTokenNode* rhs) {
+    CTCDecoderCTokenId token = lhs->token;
+    CTCDecoderCNodeFrame frame = lhs->frame;
+    float prob = lhs->prob;
+    lhs->token = rhs->token;
+    lhs->frame = rhs->frame;
+    lhs->prob = rhs->prob;
+    rhs->token = token;
+    rhs->frame = frame;
+    rhs->prob = prob;
+}
+
+static void ctc_decoder_c_copy_config(
+    CTCDecoderCConfig* dst,
+    const CTCDecoderCConfig* src) {
+    dst->score_beam_size = src->score_beam_size;
+    dst->path_beam_size = src->path_beam_size;
+    dst->min_frames = src->min_frames;
+    dst->max_frames = src->max_frames;
+    dst->interval_frames = src->interval_frames;
+    dst->frame_step = src->frame_step;
+    dst->max_prefix_len = src->max_prefix_len;
+}
+
 static int32_t ctc_decoder_c_select_topk(
     CTCDecoderCState* state,
     const float* probs,
@@ -343,9 +437,35 @@ static int32_t ctc_decoder_c_is_sublist(
 }
 
 static void ctc_decoder_c_swap_hypotheses(CTCDecoderCHypothesis* lhs, CTCDecoderCHypothesis* rhs) {
-    CTCDecoderCHypothesis tmp = *lhs;
-    *lhs = *rhs;
-    *rhs = tmp;
+    CTCDecoderCPrefixToken* prefix = lhs->prefix;
+    int32_t prefix_len = lhs->prefix_len;
+    double pb = lhs->pb;
+    double pnb = lhs->pnb;
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+    CTCDecoderCTokenNode* nodes = lhs->nodes;
+#endif
+    CTCDecoderCNodeRef* node_refs = lhs->node_refs;
+    int32_t node_count = lhs->node_count;
+
+    lhs->prefix = rhs->prefix;
+    lhs->prefix_len = rhs->prefix_len;
+    lhs->pb = rhs->pb;
+    lhs->pnb = rhs->pnb;
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+    lhs->nodes = rhs->nodes;
+#endif
+    lhs->node_refs = rhs->node_refs;
+    lhs->node_count = rhs->node_count;
+
+    rhs->prefix = prefix;
+    rhs->prefix_len = prefix_len;
+    rhs->pb = pb;
+    rhs->pnb = pnb;
+#if CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES
+    rhs->nodes = nodes;
+#endif
+    rhs->node_refs = node_refs;
+    rhs->node_count = node_count;
 }
 
 static void ctc_decoder_c_sort_next_hyps(CTCDecoderCState* state) {
@@ -421,9 +541,7 @@ static int32_t ctc_decoder_c_compact_node_pool(CTCDecoderCState* state) {
         for (index = target_index + 1; index < state->node_pool_size; ++index) {
             if (state->node_ref_remap[index] == (CTCDecoderCNodeRef)target_index) {
                 CTCDecoderCNodeRef displaced_target = state->node_ref_remap[target_index];
-                CTCDecoderCTokenNode tmp = state->node_pool[target_index];
-                state->node_pool[target_index] = state->node_pool[index];
-                state->node_pool[index] = tmp;
+                ctc_decoder_c_swap_node_value(&state->node_pool[target_index], &state->node_pool[index]);
                 state->node_ref_remap[target_index] = (CTCDecoderCNodeRef)target_index;
                 state->node_ref_remap[index] = displaced_target;
                 break;
@@ -491,6 +609,9 @@ int32_t ctc_decoder_c_init_with_allocator(
     if (!state || !config) {
         return -1;
     }
+    if (!ctc_decoder_c_is_aligned_16(state)) {
+        return -1;
+    }
     if (config->score_beam_size <= 0 || config->path_beam_size <= 0 || config->frame_step <= 0) {
         return -1;
     }
@@ -501,7 +622,7 @@ int32_t ctc_decoder_c_init_with_allocator(
     ctc_decoder_c_zero_state(state);
     ctc_decoder_c_resolve_allocator(allocator, &resolved_allocator);
     state->allocator = resolved_allocator;
-    state->config = *config;
+    ctc_decoder_c_copy_config(&state->config, config);
     state->config.max_prefix_len = ctc_decoder_c_resolve_max_prefix_len(config);
     max_prefix_len = state->config.max_prefix_len;
     state->cur_hyp_capacity = state->config.path_beam_size;
@@ -724,6 +845,7 @@ int32_t ctc_decoder_c_advance_frame(
     for (token_slot = 0; token_slot < filtered_count; ++token_slot) {
         int32_t token_id = state->topk_indices[token_slot];
         float token_prob = state->topk_probs[token_slot];
+        double token_prob_d = (double)token_prob;
         for (hyp_index = 0; hyp_index < state->cur_hyp_count; ++hyp_index) {
             CTCDecoderCHypothesis* hyp = &state->cur_hyps[hyp_index];
             int32_t last = hyp->prefix_len > 0 ? (int32_t)hyp->prefix[hyp->prefix_len - 1] : -1;
@@ -732,7 +854,7 @@ int32_t ctc_decoder_c_advance_frame(
                 if (!next_hyp || ctc_decoder_c_copy_node_refs(next_hyp, hyp, state->config.max_prefix_len) != 0) {
                     return -1;
                 }
-                next_hyp->pb += hyp->pb * token_prob + hyp->pnb * token_prob;
+                next_hyp->pb += hyp->pb * token_prob_d + hyp->pnb * token_prob_d;
                 continue;
             }
 
@@ -742,7 +864,7 @@ int32_t ctc_decoder_c_advance_frame(
                     if (!same_hyp || ctc_decoder_c_copy_node_refs(same_hyp, hyp, state->config.max_prefix_len) != 0) {
                         return -1;
                     }
-                    same_hyp->pnb += hyp->pnb * token_prob;
+                    same_hyp->pnb += hyp->pnb * token_prob_d;
                     if (same_hyp->node_count > 0) {
                         int32_t ref = (int32_t)same_hyp->node_refs[same_hyp->node_count - 1];
                         if (ref < 0 || ref >= state->node_pool_size) {
@@ -769,7 +891,7 @@ int32_t ctc_decoder_c_advance_frame(
                     if (!extend_hyp || ctc_decoder_c_copy_node_refs(extend_hyp, hyp, state->config.max_prefix_len) != 0) {
                         return -1;
                     }
-                    extend_hyp->pnb += hyp->pb * token_prob;
+                    extend_hyp->pnb += hyp->pb * token_prob_d;
                     if (extend_hyp->node_count >= state->config.max_prefix_len) {
                         return -1;
                     }
@@ -822,7 +944,7 @@ int32_t ctc_decoder_c_advance_frame(
                     next_hyp->node_refs[next_hyp->node_count] = (CTCDecoderCNodeRef)ref;
                     next_hyp->node_count += 1;
                 }
-                next_hyp->pnb += hyp->pb * token_prob + hyp->pnb * token_prob;
+                next_hyp->pnb += hyp->pb * token_prob_d + hyp->pnb * token_prob_d;
             }
         }
     }

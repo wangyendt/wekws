@@ -13,6 +13,12 @@
 #define CTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES 1
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define CTC_DECODER_C_ALIGNAS16 __attribute__((aligned(16)))
+#else
+#define CTC_DECODER_C_ALIGNAS16
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,7 +38,7 @@ typedef struct {
     float prob;
 } CTCDecoderCTokenNode;
 
-typedef struct {
+typedef struct CTC_DECODER_C_ALIGNAS16 {
     CTCDecoderCPrefixToken* prefix;
     int32_t prefix_len;
     double pb;
@@ -60,7 +66,7 @@ typedef struct {
     int32_t max_prefix_len;
 } CTCDecoderCConfig;
 
-typedef struct {
+typedef struct CTC_DECODER_C_ALIGNAS16 {
     int32_t word_index;
     const char* keyword;
     double score;
@@ -82,7 +88,7 @@ typedef struct {
     void* user_data;
 } CTCDecoderCAllocator;
 
-typedef struct {
+typedef struct CTC_DECODER_C_ALIGNAS16 {
     CTCDecoderCConfig config;
     CTCDecoderCAllocator allocator;
 
