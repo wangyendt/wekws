@@ -1,0 +1,90 @@
+# 小雷小雷项目常用命令
+# 说明：
+# 1. 只存储可直接复制执行的单行命令
+# 2. 当前按“你下一步需要执行什么”来组织
+# 3. 注释里会标明：必须 / 推荐 / 可选
+
+# ====================================================================
+# 环境与路径
+# ====================================================================
+cd /home/wayne/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0
+
+# ====================================================================
+# 当前数据集检查（可选）
+# ====================================================================
+python tools/validate_xiaolei_ctc_data.py --data-dir data_xlxl_0327_ctc_v1
+python -c "import json; obj=json.load(open('data_xlxl_0327_ctc_v1/summary.json', encoding='utf-8')); print(json.dumps({'input_counts': obj['input_counts'], 'splits': {k: {'pos_count': v['positives']['count'], 'pos_hours': v['positives']['duration_hours'], 'neg_count': v['negatives']['count'], 'neg_hours': v['negatives']['duration_hours'], 'merged_count': v['merged']['count'], 'merged_hours': v['merged']['duration_hours']} for k, v in obj['splits'].items()}}, ensure_ascii=False, indent=2))"
+
+# ====================================================================
+# 进度检查 / 后台日志（推荐）
+# 说明：screen_xiaolei_asr.py 默认不单独写 .log，但会持续写输出目录；可以用下面这些命令看进度或改成带日志后台运行
+# ====================================================================
+python -c "from pathlib import Path; p=Path('codex_artifacts/xlxl_asr_screen_dev/asr_results.jsonl'); print(sum(1 for _ in p.open('r', encoding='utf-8')) if p.is_file() else 0)"
+python -c "from pathlib import Path; p=Path('codex_artifacts/xlxl_asr_screen_test/asr_results.jsonl'); print(sum(1 for _ in p.open('r', encoding='utf-8')) if p.is_file() else 0)"
+python -c "from pathlib import Path; p=Path('codex_artifacts/xlxl_asr_screen_train/asr_results.jsonl'); print(sum(1 for _ in p.open('r', encoding='utf-8')) if p.is_file() else 0)"
+nohup python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/dev/data.list --output-dir codex_artifacts/xlxl_asr_screen_dev --device cuda:0 --progress-every 200 > codex_artifacts/xlxl_asr_screen_dev.log 2>&1 &
+nohup python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/test/data.list --output-dir codex_artifacts/xlxl_asr_screen_test --device cuda:0 --progress-every 200 > codex_artifacts/xlxl_asr_screen_test.log 2>&1 &
+nohup python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/train/data.list --output-dir codex_artifacts/xlxl_asr_screen_train --device cuda:0 --progress-every 500 > codex_artifacts/xlxl_asr_screen_train.log 2>&1 &
+tail -f codex_artifacts/xlxl_asr_screen_dev.log
+tail -f codex_artifacts/xlxl_asr_screen_test.log
+tail -f codex_artifacts/xlxl_asr_screen_train.log
+
+# ====================================================================
+# 当前必须执行：dev ASR 筛洗
+# ====================================================================
+python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/dev/data.list --output-dir codex_artifacts/xlxl_asr_screen_dev --device cuda:0 --progress-every 200
+python -c "import json; print(json.dumps(json.load(open('codex_artifacts/xlxl_asr_screen_dev/summary.json', encoding='utf-8')), ensure_ascii=False, indent=2))"
+
+# ====================================================================
+# 当前必须执行：test ASR 筛洗
+# ====================================================================
+python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/test/data.list --output-dir codex_artifacts/xlxl_asr_screen_test --device cuda:0 --progress-every 200
+python -c "import json; print(json.dumps(json.load(open('codex_artifacts/xlxl_asr_screen_test/summary.json', encoding='utf-8')), ensure_ascii=False, indent=2))"
+
+# ====================================================================
+# 当前建议执行：train ASR 筛洗
+# 说明：从 dev/test 的异常比例看，train 也应该全量过一遍；如果单卡跑，优先用下面的 nohup 或“全量顺序清洗”命令
+# ====================================================================
+python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/train/data.list --output-dir codex_artifacts/xlxl_asr_screen_train --device cuda:0 --progress-every 500
+python -c "import json; print(json.dumps(json.load(open('codex_artifacts/xlxl_asr_screen_train/summary.json', encoding='utf-8')), ensure_ascii=False, indent=2))"
+python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/train/data.list --output-dir codex_artifacts/xlxl_asr_screen_train_smoke --device cuda:0 --limit 200 --progress-every 50
+
+# ====================================================================
+# 推荐执行：全量顺序 ASR 清洗（单卡顺序跑完 dev/test/train）
+# ====================================================================
+for split in dev test train; do python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/${split}/data.list --output-dir codex_artifacts/xlxl_asr_screen_${split} --device cuda:0 --progress-every $( [ "$split" = train ] && echo 500 || echo 200 ); done
+
+# ====================================================================
+# 可选执行：导出 dev/test 到本地人工复核
+# 说明：如果你要在本地电脑听标/人工检查，这一块需要执行；如果暂时不做本地人工复核，可以先不执行
+# ====================================================================
+python tools/export_xiaolei_review_package.py --data-dir data_xlxl_0327_ctc_v1 --splits dev,test --output-dir /tmp/xlxl_review_package_dev_test
+python -c "import json; print(json.dumps(json.load(open('/tmp/xlxl_review_package_dev_test/summary.json', encoding='utf-8')), ensure_ascii=False, indent=2))"
+tar -czf /tmp/xlxl_review_package_dev_test.tar.gz -C /tmp xlxl_review_package_dev_test
+
+# ====================================================================
+# 本地电脑执行：从服务器下载人工复核包（把 your_user@your_server 替换成你的实际登录信息）
+# ====================================================================
+scp your_user@your_server:/tmp/xlxl_review_package_dev_test.tar.gz ~/Downloads/
+rsync -avP your_user@your_server:/tmp/xlxl_review_package_dev_test.tar.gz ~/Downloads/
+
+# ====================================================================
+# 历史数据准备命令（一般不用重复执行，除非你要重新生成 data_xlxl_0327_ctc_v1）
+# ====================================================================
+python tools/prepare_xiaolei_ctc_data.py --xlxl-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_XIAOLEI_XIAOLEI.list --kuaipai-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_XIAOLEI_KUAIPAI.list --filler-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_FILLER.list --extra-neg-list data/train/data.list --extra-neg-list data/dev/data.list --extra-neg-list data/test/data.list --output-dir data_xlxl_0327_ctc_v1 --neg-pos-ratio 3.0 --seed 42 --max-train-negatives 120000 --max-dev-negatives 8000 --max-test-negatives 8000 --keep-source-manifest
+
+# ====================================================================
+# 基础模型训练（baseline）
+# ====================================================================
+
+# ====================================================================
+# 评测与分析
+# ====================================================================
+
+# ====================================================================
+# 蒸馏与压缩
+# ====================================================================
+
+# ====================================================================
+# 导出与量化
+# ====================================================================
