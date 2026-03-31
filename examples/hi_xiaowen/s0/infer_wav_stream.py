@@ -63,6 +63,8 @@ def parse_args():
     parser.add_argument("--gpu", type=int, default=-1, help="GPU id，默认 -1 表示 CPU")
     parser.add_argument("--disable_threshold", action="store_true", help="只输出原始候选结果，不做最终阈值判定")
     parser.add_argument("--chunk_ms", type=float, default=300.0, help="每次送入流式推理的音频 chunk 时长")
+    parser.add_argument("--dump_dir", default="", help="可选：把 accepted_feats 落盘到这个目录")
+    parser.add_argument("--align_center_context", action="store_true", help="可选：让首个保留帧对齐到 context 中心，适配在线补零策略")
     parser.add_argument("--score_beam_size", type=int, default=3, help="逐帧 token 初筛 beam size")
     parser.add_argument("--path_beam_size", type=int, default=20, help="prefix beam size")
     parser.add_argument("--min_frames", type=int, default=5, help="关键词最短帧数")
@@ -159,6 +161,8 @@ class StreamingKeywordSpotter:
         disable_threshold: bool,
         use_cpp_decoder: bool = False,
         use_c_decoder: bool = False,
+        dump_dir: Optional[Path] = None,
+        align_center_context: bool = False,
     ):
         dataset_conf = configs["dataset_conf"]
         fbank_conf = dataset_conf["fbank_conf"]
@@ -193,9 +197,11 @@ class StreamingKeywordSpotter:
         self.max_frames = max_frames
         self.interval_frames = interval_frames
         self.disable_threshold = disable_threshold
+        self.dump_dir = dump_dir
+        self.accepted_feat_chunks: List[np.ndarray] = []
 
         self.feature_remained = None
-        self.feats_ctx_offset = 0
+        self.feats_ctx_offset = (self.left_context % self.downsampling) if (align_center_context and self.downsampling > 1) else 0
         self.in_cache = torch.zeros(0, 0, 0, dtype=torch.float32, device=device)
         self.tflite_feat_input_detail = None
         self.tflite_cache_input_detail = None
@@ -317,6 +323,9 @@ class StreamingKeywordSpotter:
             remainder = (feats.size(0) + last_remainder) % self.downsampling
             feats = feats[self.feats_ctx_offset::self.downsampling, :]
             self.feats_ctx_offset = remainder if remainder == 0 else self.downsampling - remainder
+
+        if self.dump_dir is not None and feats.size(0) > 0:
+            self.accepted_feat_chunks.append(feats.detach().cpu().numpy().astype(np.float32, copy=True))
 
         return feats
 
@@ -468,6 +477,18 @@ class StreamingKeywordSpotter:
             return
         self.cur_hyps = [(tuple(), (1.0, 0.0, []))]
 
+    def dump_artifacts(self) -> Optional[str]:
+        if self.dump_dir is None:
+            return None
+        self.dump_dir.mkdir(parents=True, exist_ok=True)
+        if self.accepted_feat_chunks:
+            accepted_feats = np.concatenate(self.accepted_feat_chunks, axis=0).astype(np.float32, copy=False)
+        else:
+            accepted_feats = np.zeros((0, 0), dtype=np.float32)
+        np.save(self.dump_dir / 'accepted_feats.npy', accepted_feats)
+        np.savetxt(self.dump_dir / 'accepted_feats.txt', accepted_feats, fmt='%.8f')
+        return str(self.dump_dir)
+
     def get_best_decode_result(self) -> Dict[str, object]:
         if self._native_decoder is not None:
             return self._native_decoder.get_best_decode_result()
@@ -549,6 +570,8 @@ def main():
         disable_threshold=args.disable_threshold,
         use_cpp_decoder=args.use_cpp_decoder,
         use_c_decoder=args.use_c_decoder,
+        dump_dir=Path(args.dump_dir).expanduser().resolve() if args.dump_dir else None,
+        align_center_context=args.align_center_context,
     )
 
     waveform = iw.load_wav_and_resample(wav_path, streamer.sample_rate)
@@ -583,6 +606,10 @@ def main():
     result["model_type"] = model_type
     result["use_cpp_decoder"] = args.use_cpp_decoder
     result["use_c_decoder"] = args.use_c_decoder
+    result["align_center_context"] = args.align_center_context
+    artifact_dir = streamer.dump_artifacts()
+    if artifact_dir is not None:
+        result["dump_dir"] = artifact_dir
     print(json.dumps(result, ensure_ascii=False, indent=args.indent))
 
 

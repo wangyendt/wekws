@@ -162,6 +162,17 @@ python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a
 HI_XIAOWEN_CTC_DECODER_C_EXTRA_CFLAGS="-DCTC_DECODER_C_ENABLE_DEBUG_HYPOTHESES=0" python ./evaluate_infer_wav.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --test_data data/test/data.list --gpus 0,1,2,3 --progress_every 2000 --streaming --chunk_ms 1000 --path_beam_size 16 --use_c_decoder --result_test_id test_infer_stream_399_c_post_p16_55k
 # 单条 wav 的流式 Torch smoke test，确认在线推理输出是否正常。
 python ./infer_wav_stream.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --wav speech_charctc_kws_phone-xiaoyun/example/kws_xiaoyunxiaoyun.wav --disable_threshold
+# C decoder smoke tests（集中放一起）。
+# 从 int16_200ms_16k_random.cc 重新生成随机 200ms@16kHz wav（当前 .cc 已恢复为补前置 15ms 0 的版本）。
+python -c "import re,wave,struct;from pathlib import Path;cc=Path('codex_artifacts/int16_200ms_16k_random_distill199_logits/int16_200ms_16k_random.cc').read_text(encoding='utf-8');cc=re.sub(r'//.*','',cc);nums=[int(x) for x in re.findall(r'-?\d+',re.search(r'kTestAudio200ms16k\[[^\]]+\]\s*=\s*\{(.*?)\};',cc,re.S).group(1))];out=Path('codex_artifacts/int16_200ms_16k_random_distill199_logits/input.wav');out.parent.mkdir(parents=True,exist_ok=True);wf=wave.open(str(out),'wb');wf.setnchannels(1);wf.setsampwidth(2);wf.setframerate(16000);wf.writeframes(struct.pack('<{}h'.format(len(nums)),*nums));wf.close();print(out)"
+# distill199 + pt：用 C decoder 跑 200ms@16kHz 的随机 int16 测试音频（由 int16_200ms_16k_random.cc 转出的 wav）。
+PYTHONPATH=/home/wayne/work/code/project/ffalcon/wekws_baseline python ./infer_wav_stream.py --model distill199 --checkpoint exp/fsmn_ctc_distill_mini_align_20_test2/229.pt --wav codex_artifacts/int16_200ms_16k_random_distill199_logits/input.wav --use_c_decoder --disable_threshold
+# S3 + LiteRT PT2E INT8：单条 wav 的流式 INT8 TFLite + C decoder smoke test。
+python ./infer_wav_stream.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_litert_int8.tflite --wav speech_charctc_kws_phone-xiaoyun/example/kws_xiaoyunxiaoyun.wav --use_c_decoder --disable_threshold
+# S3 + native PTQ TFLite：跑 int16_200ms_16k_random.cc 对应的随机 wav（C decoder）。
+python ./infer_wav_stream.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_native_int8_calib200.tflite --wav codex_artifacts/int16_200ms_16k_random_distill199_logits/input.wav --use_c_decoder --disable_threshold
+# S3 + LiteRT PT2E INT8：跑补前置 15ms 0 的随机 wav，启用首帧中心对齐并落盘 accepted_feats。
+python ./infer_wav_stream.py --model s3 --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399_stream_litert_int8.tflite --wav codex_artifacts/int16_200ms_16k_random_distill199_logits/input.wav --use_c_decoder --disable_threshold --align_center_context --dump_dir codex_artifacts/int16_200ms_16k_random_s3_litert_int8_c_decoder_dump
 
 # 导出流式 step TFLite：输入是 1x1x400 特征帧 + cache，输出是 logits + 新 cache。
 python ./torch2lite/export_streaming_litert_tflite.py --config exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/config.yaml --checkpoint exp/fsmn_ctc_distill_s3_a48_p24_l3_merged/399.pt --dump_meta
