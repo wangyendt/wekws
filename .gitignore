@@ -42,3 +42,4 @@ tensorboard
 
 examples/hi_xiaowen/s0/mobvoi_kws_transcription
 examples/hi_xiaowen/s0/record_label_webui/runtime/
+rayneo_hotword_tflm/
