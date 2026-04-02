@@ -89,7 +89,10 @@ def get_args():
                         default='dict',
                         help='dict dir of the pretrained checkpoint '
                              '(for weight surgery)')
-
+    parser.add_argument('--max_epoch',
+                        default=-1,
+                        type=int,
+                        help='override training_config.max_epoch when >= 0')
 
     args = parser.parse_args()
     return args
@@ -230,6 +233,8 @@ def main():
 
     training_config = configs['training_config']
     training_config['min_duration'] = args.min_duration
+    if args.max_epoch >= 0:
+        training_config['max_epoch'] = args.max_epoch
     num_epochs = training_config.get('max_epoch', 100)
     final_epoch = None
     if start_epoch == 0 and rank == 0:

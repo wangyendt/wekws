@@ -37,6 +37,7 @@ checkpoint=
 target_exp_dir=exp/fsmn_ctc
 average_model=true
 num_average=30
+max_epoch=
 
 # 尝试从配置文件读取 download_dir
 if [ -f wayne_scripts/config.yaml ]; then
@@ -213,6 +214,11 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   echo "Start training ..."
   mkdir -p $dir
   cmvn_opts=
+  max_epoch_opts=
+  if [ -n "$max_epoch" ]; then
+    max_epoch_opts="--max_epoch $max_epoch"
+    echo "Override max_epoch: $max_epoch"
+  fi
   $norm_mean && cmvn_opts="--cmvn_file ${data_dir}/global_cmvn.kaldi"
   $norm_var && cmvn_opts="$cmvn_opts --norm_var"
   num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
@@ -232,6 +238,7 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
       --min_duration 50 \
       --seed 666 \
       $cmvn_opts \
+      $max_epoch_opts \
       ${checkpoint:+--checkpoint $checkpoint}
 fi
 
