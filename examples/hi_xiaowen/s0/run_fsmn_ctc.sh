@@ -31,6 +31,7 @@ checkpoint_dict="dict"
 checkpoint_strict=true
 dict_auto_build=false
 dict_sorted_file="examples/hi_xiaowen/s0/dict/model_vocab_freq_asr_sorted.txt"
+data_dir=data
 
 checkpoint=
 target_exp_dir=exp/fsmn_ctc
@@ -133,16 +134,16 @@ if [ ${stage_int} -le -1 ] && [ ${stop_stage_int} -ge -1 ]; then
   awk '{print $1}' dict/dict.txt > dict/words.txt
 
   for folder in train dev test; do
-    mkdir -p data/$folder
+    mkdir -p ${data_dir}/$folder
     for prefix in p n; do
-      mkdir -p data/${prefix}_$folder
+      mkdir -p ${data_dir}/${prefix}_$folder
       json_path=$download_dir/mobvoi_hotword_dataset_resources/${prefix}_$folder.json
       local/prepare_data.py $download_dir/mobvoi_hotword_dataset $json_path \
-        ${dict_dir}/dict.txt data/${prefix}_$folder
+        ${dict_dir}/dict.txt ${data_dir}/${prefix}_$folder
     done
-    cat data/p_$folder/wav.scp data/n_$folder/wav.scp > data/$folder/wav.scp
-    cat data/p_$folder/text data/n_$folder/text > data/$folder/text
-    rm -rf data/p_$folder data/n_$folder
+    cat ${data_dir}/p_$folder/wav.scp ${data_dir}/n_$folder/wav.scp > ${data_dir}/$folder/wav.scp
+    cat ${data_dir}/p_$folder/text ${data_dir}/n_$folder/text > ${data_dir}/$folder/text
+    rm -rf ${data_dir}/p_$folder ${data_dir}/n_$folder
   done
 fi
 
@@ -151,10 +152,10 @@ if [ ${stage_int} -le -0 ] && [ ${stop_stage_int} -ge -0 ]; then
 # to transcribe the negative wavs, and upload the transcription to modelscope.
   git clone https://www.modelscope.cn/datasets/thuduj12/mobvoi_kws_transcription.git
   for folder in train dev test; do
-    if [ -f data/$folder/text ];then
-      mv data/$folder/text data/$folder/text.label
+    if [ -f ${data_dir}/$folder/text ];then
+      mv ${data_dir}/$folder/text ${data_dir}/$folder/text.label
     fi
-    cp mobvoi_kws_transcription/$folder.text data/$folder/text
+    cp mobvoi_kws_transcription/$folder.text ${data_dir}/$folder/text
   done
 
   # and we also copy the tokens and lexicon that used in
@@ -169,15 +170,15 @@ fi
 if [ ${stage_int} -le 1 ] && [ ${stop_stage_int} -ge 1 ]; then
   echo "Compute CMVN and Format datasets"
   tools/compute_cmvn_stats.py --num_workers 16 --train_config $config \
-    --in_scp data/train/wav.scp \
-    --out_cmvn data/train/global_cmvn
+    --in_scp ${data_dir}/train/wav.scp \
+    --out_cmvn ${data_dir}/train/global_cmvn
 
   for x in train dev test; do
-    tools/wav_to_duration.sh --nj 8 data/$x/wav.scp data/$x/wav.dur
+    tools/wav_to_duration.sh --nj 8 ${data_dir}/$x/wav.scp ${data_dir}/$x/wav.dur
 
     # Here we use tokens.txt and lexicon.txt to convert txt into index
-    tools/make_list.py data/$x/wav.scp data/$x/text \
-      data/$x/wav.dur data/$x/data.list
+    tools/make_list.py ${data_dir}/$x/wav.scp ${data_dir}/$x/text \
+      ${data_dir}/$x/wav.dur ${data_dir}/$x/data.list
   done
 fi
 
@@ -186,7 +187,7 @@ fi
 # Run separately: bash run_fsmn_ctc.sh 1.5 1.5
 if [ ${stage} == "1.5" ]; then
   echo "Building metadata database for WebUI..."
-  python3 tools/generate_metadata_db.py --output-db data/metadata.db --force
+  python3 tools/generate_metadata_db.py --output-db ${data_dir}/metadata.db --force
   echo ""
   echo "To start the WebUI, run:"
   echo "  cd wayne_scripts && sh stage_1.5_webui.sh"
@@ -196,18 +197,23 @@ fi
 
 if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
 
-  echo "Use the base model from modelscope"
+  echo "Prepare checkpoint and CMVN"
   if [ ! -d speech_charctc_kws_phone-xiaoyun ] ;then
       git lfs install
       git clone https://www.modelscope.cn/damo/speech_charctc_kws_phone-xiaoyun.git
   fi
-  checkpoint=speech_charctc_kws_phone-xiaoyun/train/base.pt
-  cp speech_charctc_kws_phone-xiaoyun/train/feature_transform.txt.80dim-l2r2 data/global_cmvn.kaldi
+  if [ -z "$checkpoint" ]; then
+    echo "Use the base model from modelscope"
+    checkpoint=speech_charctc_kws_phone-xiaoyun/train/base.pt
+  else
+    echo "Use custom checkpoint: $checkpoint"
+  fi
+  cp speech_charctc_kws_phone-xiaoyun/train/feature_transform.txt.80dim-l2r2 ${data_dir}/global_cmvn.kaldi
 
   echo "Start training ..."
   mkdir -p $dir
   cmvn_opts=
-  $norm_mean && cmvn_opts="--cmvn_file data/global_cmvn.kaldi"
+  $norm_mean && cmvn_opts="--cmvn_file ${data_dir}/global_cmvn.kaldi"
   $norm_var && cmvn_opts="$cmvn_opts --norm_var"
   num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
 
@@ -215,8 +221,8 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$num_gpus \
     wekws/bin/train.py --gpus $gpus \
       --config $config \
-      --train_data data/train/data.list \
-      --cv_data data/dev/data.list \
+      --train_data ${data_dir}/train/data.list \
+      --cv_data ${data_dir}/dev/data.list \
       --model_dir $dir \
       --num_workers 8 \
       --num_keywords $num_keywords \
@@ -247,7 +253,7 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
   fi
   python wekws/bin/${score_prefix}score_ctc.py \
     --config $dir/config.yaml \
-    --test_data data/test/data.list \
+    --test_data ${data_dir}/test/data.list \
     --gpu 0  \
     --batch_size 256 \
     --checkpoint $score_checkpoint \
@@ -260,7 +266,7 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
 
   python wekws/bin/compute_det_ctc.py \
       --keywords "\u55e8\u5c0f\u95ee,\u4f60\u597d\u95ee\u95ee" \
-      --test_data data/test/data.list \
+      --test_data ${data_dir}/test/data.list \
       --window_shift $window_shift \
       --step 0.001  \
       --score_file $result_dir/score.txt \

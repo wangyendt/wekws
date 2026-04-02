@@ -74,12 +74,47 @@ rsync -avP your_user@your_server:/tmp/xlxl_review_package_dev_test.tar.gz ~/Down
 python tools/prepare_xiaolei_ctc_data.py --xlxl-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_XIAOLEI_XIAOLEI.list --kuaipai-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_XIAOLEI_KUAIPAI.list --filler-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_FILLER.list --extra-neg-list data/train/data.list --extra-neg-list data/dev/data.list --extra-neg-list data/test/data.list --output-dir data_xlxl_0327_ctc_v1 --neg-pos-ratio 3.0 --seed 42 --max-train-negatives 120000 --max-dev-negatives 8000 --max-test-negatives 8000 --keep-source-manifest
 
 # ====================================================================
-# 基础模型训练（baseline）
+# 基于筛洗结果生成可信 clean 数据集（当前推荐）
 # ====================================================================
+python tools/build_xiaolei_screened_dataset.py --source-data-dir data_xlxl_0327_ctc_v1 --screen-root codex_artifacts --output-dir data_xlxl_0327_ctc_v1_clean --keep-source-manifest
+python tools/validate_xiaolei_ctc_data.py --data-dir data_xlxl_0327_ctc_v1_clean
+python -c "import json; obj=json.load(open('data_xlxl_0327_ctc_v1_clean/summary.json', encoding='utf-8')); print(json.dumps({k:{'source_count':v['source']['count'], 'selected_count':v['selected']['count'], 'removed_count':v['removed_count'], 'selected_hours':v['selected']['duration_hours'], 'selected_pos':v['selected']['positives'], 'selected_neg':v['selected']['negatives']} for k,v in obj['splits'].items()}, ensure_ascii=False, indent=2))"
+
+# ====================================================================
+# 基础模型训练（baseline）
+# 说明：这一版先只用 clean bucket，保持 2599 head / dict / checkpoint_strict 不变，只替换 data_dir
+# ====================================================================
+bash run_fsmn_ctc.sh --data_dir data_xlxl_0327_ctc_v1_clean --target_exp_dir exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --gpus 0,1,2,3 --dict_dir dict --checkpoint_dict dict --num_keywords 2599 --checkpoint_strict true 2 2
+bash run_fsmn_ctc.sh --data_dir data_xlxl_0327_ctc_v1_clean --target_exp_dir exp/fsmn_ctc_xlxl_0327_clean_baseline_2599_1gpu --gpus 0 --dict_dir dict --checkpoint_dict dict --num_keywords 2599 --checkpoint_strict true 2 2
+bash run_fsmn_ctc.sh --data_dir data_xlxl_0327_ctc_v1_clean --target_exp_dir exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --gpus 0 --dict_dir dict --checkpoint_dict dict --num_keywords 2599 --checkpoint_strict true 3 3
 
 # ====================================================================
 # 评测与分析
+# 说明：这里统一走 evaluate.sh，并显式指定小雷数据目录与关键词
 # ====================================================================
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --keywords "小雷小雷,小雷快拍" --gpu "0,1,2,3"
+python tools/prepare_xiaolei_eval_data.py --input-list /home/xushang/kws_ws/wekws/examples/hi_xiaowen/s0/datasets/test.list --output-dir codex_artifacts/xlxl_external_test_eval_max20 --max-duration 20.0 --keep-source-manifest
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --dataset test --data_dir codex_artifacts/xlxl_external_test_eval_max20 --keywords "小雷小雷" --result_suffix xlxl_external_test_79_max20 --gpu 2 --batch_size 32
+python wekws/bin/average_model.py --dst_model exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/avg_30.pt --src_path exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --num 30 --val_best
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/avg_30.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --keywords "小雷小雷,小雷快拍" --gpu 0
+
+# ====================================================================
+# 小雷专用 Top20 词表与 Weight Surgery（推荐下一步）
+# 说明：不要再用历史全局排序文件做 forced top20；这里改成先基于当前 clean 数据生成小雷专用排序文件，
+#      再生成 dict_top20_xlxl，后续 weight surgery / 蒸馏 / 评测统一复用这份 dict。
+# ====================================================================
+python tools/build_sorted_vocab_from_data.py --data-dir data_xlxl_0327_ctc_v1_clean --dict dict/dict.txt --output dict/model_vocab_freq_asr_sorted_xlxl_clean.txt
+python tools/gen_reduced_dict.py --sorted_file "$(pwd)/dict/model_vocab_freq_asr_sorted_xlxl_clean.txt" --num_keywords 20 --output_dir "$(pwd)/dict_top20_xlxl"
+sed -n '1,24p' dict/model_vocab_freq_asr_sorted_xlxl_clean.txt
+sed -n '1,40p' dict_top20_xlxl/dict.txt
+bash run_fsmn_ctc.sh --data_dir data_xlxl_0327_ctc_v1_clean --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --checkpoint_dict dict --target_exp_dir exp/fsmn_ctc_xlxl_top20_weight_surgery --gpus 0,1,2,3 --dict_dir dict_top20_xlxl --num_keywords 20 --checkpoint_strict false 2 2
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/79.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
+python examples/hi_xiaowen/s0/analyze_exp_test_stats.py --exp-dir examples/hi_xiaowen/s0/exp/fsmn_ctc_xlxl_top20_weight_surgery --test-id 79 --target-fa-per-hour 1.0 --pick-mode legacy
+python wekws/bin/average_model.py --dst_model exp/fsmn_ctc_xlxl_top20_weight_surgery/avg_30.pt --src_path exp/fsmn_ctc_xlxl_top20_weight_surgery --num 30 --val_best
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/avg_30.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
+python tools/prepare_xiaolei_eval_data.py --input-list /home/xushang/kws_ws/wekws/examples/hi_xiaowen/s0/datasets/test.list --output-dir codex_artifacts/xlxl_external_test_eval_max20 --max-duration 20.0 --keep-source-manifest
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/79.pt --dataset test --data_dir codex_artifacts/xlxl_external_test_eval_max20 --dict_dir dict_top20_xlxl --keywords "小雷小雷" --result_suffix xlxl_external_test_top20_79_max20 --gpu 2 --batch_size 32
+python examples/hi_xiaowen/s0/analyze_exp_test_stats.py --exp-dir examples/hi_xiaowen/s0/exp/fsmn_ctc_xlxl_top20_weight_surgery --test-id test_79_xlxl_external_test_top20_79_max20 --target-fa-per-hour 1.0 --pick-mode legacy
 
 # ====================================================================
 # 蒸馏与压缩

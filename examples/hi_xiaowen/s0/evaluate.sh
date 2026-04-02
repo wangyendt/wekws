@@ -16,6 +16,7 @@ executorch_model=""
 executorch_seq_len=100
 model_config=""
 dataset="test"  # train, dev, test
+data_dir="data"
 gpu="0"
 batch_size=256
 num_workers=8
@@ -27,6 +28,7 @@ lexicon_file="mobvoi_kws_transcription/lexicon.txt"
 window_shift=50
 sample_ratio=1.0
 sample_seed=42
+result_suffix=""
 
 # 解析命令行参数
 . tools/parse_options.sh || exit 1;
@@ -34,10 +36,11 @@ sample_seed=42
 # 检查必需参数
 if [ -z "$checkpoint" ] && [ -z "$executorch_model" ]; then
     echo "错误: 必须指定 --checkpoint 或 --executorch_model 参数"
-    echo "用法: bash evaluate.sh [--checkpoint <checkpoint_path>] [--executorch_model <model.pte>] [--dataset train|dev|test] [--gpu <gpu_ids>]"
+    echo "用法: bash evaluate.sh [--checkpoint <checkpoint_path>] [--executorch_model <model.pte>] [--dataset train|dev|test] [--data_dir <data_root>] [--keywords <kw1,kw2>] [--result_suffix <name>] [--gpu <gpu_ids>]"
     echo ""
     echo "示例:"
     echo "  bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/61.pt --dataset test --gpu 0"
+    echo "  bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --keywords \"小雷小雷,小雷快拍\" --gpu 0"
     echo "  bash evaluate.sh --checkpoint exp/fsmn_ctc_baseline_4gpus/avg_30.pt --dataset dev --gpu \"0,1,2,3\""
     echo "  bash evaluate.sh --executorch_model exp/.../229_executorch_fp32.pte --checkpoint exp/.../229.pt --dict_dir dict_top20"
     exit 1
@@ -67,6 +70,9 @@ else
     config_file="$model_dir/config.yaml"
 fi
 result_dir="$model_dir/${dataset}_${model_basename}"
+if [ -n "$result_suffix" ]; then
+    result_dir="${result_dir}_${result_suffix}"
+fi
 
 # 检查 config 文件是否存在
 if [ ! -f "$config_file" ]; then
@@ -75,7 +81,7 @@ if [ ! -f "$config_file" ]; then
 fi
 
 # 设置数据文件
-data_file="data/${dataset}/data.list"
+data_file="${data_dir}/${dataset}/data.list"
 if [ ! -f "$data_file" ]; then
     echo "错误: 数据文件不存在: $data_file"
     exit 1
@@ -133,6 +139,7 @@ echo "================================================"
 echo "模型 checkpoint: $checkpoint"
 echo "ExecuTorch模型:   $executorch_model"
 echo "模型 config:     $config_file"
+echo "数据目录:        $data_dir"
 echo "评测数据集:      $dataset ($data_file)"
 echo "采样比例:        $sample_ratio"
 echo "GPU:             $gpu"
