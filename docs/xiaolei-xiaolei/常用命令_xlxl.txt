@@ -1,121 +1,90 @@
-# 小雷小雷项目常用命令
-# 说明：
-# 1. 只存储可直接复制执行的单行命令
-# 2. 当前按“你下一步需要执行什么”来组织
-# 3. 注释里会标明：必须 / 推荐 / 可选
+# ==================================================
+# 小雷小雷 / 小雷快拍 项目常用命令
+# ==================================================
 
 # ====================================================================
-# 环境与路径
-# ====================================================================
-cd /home/wayne/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0
-
-# ====================================================================
-# 当前数据集检查（可选）
-# ====================================================================
-python tools/validate_xiaolei_ctc_data.py --data-dir data_xlxl_0327_ctc_v1
-python -c "import json; obj=json.load(open('data_xlxl_0327_ctc_v1/summary.json', encoding='utf-8')); print(json.dumps({'input_counts': obj['input_counts'], 'splits': {k: {'pos_count': v['positives']['count'], 'pos_hours': v['positives']['duration_hours'], 'neg_count': v['negatives']['count'], 'neg_hours': v['negatives']['duration_hours'], 'merged_count': v['merged']['count'], 'merged_hours': v['merged']['duration_hours']} for k, v in obj['splits'].items()}}, ensure_ascii=False, indent=2))"
-
-# ====================================================================
-# 进度检查 / 后台日志（推荐）
-# 说明：screen_xiaolei_asr.py 默认不单独写 .log，但会持续写输出目录；可以用下面这些命令看进度或改成带日志后台运行
-# ====================================================================
-python -c "from pathlib import Path; p=Path('codex_artifacts/xlxl_asr_screen_dev/asr_results.jsonl'); print(sum(1 for _ in p.open('r', encoding='utf-8')) if p.is_file() else 0)"
-python -c "from pathlib import Path; p=Path('codex_artifacts/xlxl_asr_screen_test/asr_results.jsonl'); print(sum(1 for _ in p.open('r', encoding='utf-8')) if p.is_file() else 0)"
-python -c "from pathlib import Path; p=Path('codex_artifacts/xlxl_asr_screen_train/asr_results.jsonl'); print(sum(1 for _ in p.open('r', encoding='utf-8')) if p.is_file() else 0)"
-nohup python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/dev/data.list --output-dir codex_artifacts/xlxl_asr_screen_dev --device cuda:0 --progress-every 200 > codex_artifacts/xlxl_asr_screen_dev.log 2>&1 &
-nohup python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/test/data.list --output-dir codex_artifacts/xlxl_asr_screen_test --device cuda:0 --progress-every 200 > codex_artifacts/xlxl_asr_screen_test.log 2>&1 &
-nohup python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/train/data.list --output-dir codex_artifacts/xlxl_asr_screen_train --device cuda:0 --progress-every 500 > codex_artifacts/xlxl_asr_screen_train.log 2>&1 &
-tail -f codex_artifacts/xlxl_asr_screen_dev.log
-tail -f codex_artifacts/xlxl_asr_screen_test.log
-tail -f codex_artifacts/xlxl_asr_screen_train.log
-
-# ====================================================================
-# 当前必须执行：dev ASR 筛洗
-# ====================================================================
-python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/dev/data.list --output-dir codex_artifacts/xlxl_asr_screen_dev --device cuda:0 --progress-every 200
-python -c "import json; print(json.dumps(json.load(open('codex_artifacts/xlxl_asr_screen_dev/summary.json', encoding='utf-8')), ensure_ascii=False, indent=2))"
-
-# ====================================================================
-# 当前必须执行：test ASR 筛洗
-# ====================================================================
-python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/test/data.list --output-dir codex_artifacts/xlxl_asr_screen_test --device cuda:0 --progress-every 200
-python -c "import json; print(json.dumps(json.load(open('codex_artifacts/xlxl_asr_screen_test/summary.json', encoding='utf-8')), ensure_ascii=False, indent=2))"
-
-# ====================================================================
-# 当前建议执行：train ASR 筛洗
-# 说明：从 dev/test 的异常比例看，train 也应该全量过一遍；如果单卡跑，优先用下面的 nohup 或“全量顺序清洗”命令
-# ====================================================================
-python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/train/data.list --output-dir codex_artifacts/xlxl_asr_screen_train --device cuda:0 --progress-every 500
-python -c "import json; print(json.dumps(json.load(open('codex_artifacts/xlxl_asr_screen_train/summary.json', encoding='utf-8')), ensure_ascii=False, indent=2))"
-python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/train/data.list --output-dir codex_artifacts/xlxl_asr_screen_train_smoke --device cuda:0 --limit 200 --progress-every 50
-
-# ====================================================================
-# 推荐执行：全量顺序 ASR 清洗（单卡顺序跑完 dev/test/train）
-# ====================================================================
-for split in dev test train; do python tools/screen_xiaolei_asr.py --input-list data_xlxl_0327_ctc_v1/${split}/data.list --output-dir codex_artifacts/xlxl_asr_screen_${split} --device cuda:0 --progress-every $( [ "$split" = train ] && echo 500 || echo 200 ); done
-
-# ====================================================================
-# 可选执行：导出 dev/test 到本地人工复核
-# 说明：如果你要在本地电脑听标/人工检查，这一块需要执行；如果暂时不做本地人工复核，可以先不执行
-# ====================================================================
-python tools/export_xiaolei_review_package.py --data-dir data_xlxl_0327_ctc_v1 --splits dev,test --output-dir /tmp/xlxl_review_package_dev_test
-python -c "import json; print(json.dumps(json.load(open('/tmp/xlxl_review_package_dev_test/summary.json', encoding='utf-8')), ensure_ascii=False, indent=2))"
-tar -czf /tmp/xlxl_review_package_dev_test.tar.gz -C /tmp xlxl_review_package_dev_test
-
-# ====================================================================
-# 本地电脑执行：从服务器下载人工复核包（把 your_user@your_server 替换成你的实际登录信息）
-# ====================================================================
-scp your_user@your_server:/tmp/xlxl_review_package_dev_test.tar.gz ~/Downloads/
-rsync -avP your_user@your_server:/tmp/xlxl_review_package_dev_test.tar.gz ~/Downloads/
-
-# ====================================================================
-# 历史数据准备命令（一般不用重复执行，除非你要重新生成 data_xlxl_0327_ctc_v1）
+# 数据准备：生成 0327 小雷数据集
+# 作用：把 小雷小雷 / 小雷快拍 / filler / 额外负样本 合并成 train/dev/test 三个 split
 # ====================================================================
 python tools/prepare_xiaolei_ctc_data.py --xlxl-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_XIAOLEI_XIAOLEI.list --kuaipai-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_XIAOLEI_KUAIPAI.list --filler-list /home/xushang/kws_ws/extra_datasets/kws_data_0327/data_0327_FILLER.list --extra-neg-list data/train/data.list --extra-neg-list data/dev/data.list --extra-neg-list data/test/data.list --output-dir data_xlxl_0327_ctc_v1 --neg-pos-ratio 3.0 --seed 42 --max-train-negatives 120000 --max-dev-negatives 8000 --max-test-negatives 8000 --keep-source-manifest
 
 # ====================================================================
-# 基于筛洗结果生成可信 clean 数据集（当前推荐）
+# 数据筛洗：生成可信 clean 数据集
+# 作用：基于 ASR 筛洗结果生成 clean 版 train/dev/test
 # ====================================================================
 python tools/build_xiaolei_screened_dataset.py --source-data-dir data_xlxl_0327_ctc_v1 --screen-root codex_artifacts --output-dir data_xlxl_0327_ctc_v1_clean --keep-source-manifest
 python tools/validate_xiaolei_ctc_data.py --data-dir data_xlxl_0327_ctc_v1_clean
 python -c "import json; obj=json.load(open('data_xlxl_0327_ctc_v1_clean/summary.json', encoding='utf-8')); print(json.dumps({k:{'source_count':v['source']['count'], 'selected_count':v['selected']['count'], 'removed_count':v['removed_count'], 'selected_hours':v['selected']['duration_hours'], 'selected_pos':v['selected']['positives'], 'selected_neg':v['selected']['negatives']} for k,v in obj['splits'].items()}, ensure_ascii=False, indent=2))"
 
 # ====================================================================
-# 基础模型训练（baseline）
-# 说明：这一版先只用 clean bucket，保持 2599 head / dict / checkpoint_strict 不变，只替换 data_dir
+# baseline2599 训练
+# 作用：在 clean 数据上训练 full-head baseline2599
 # ====================================================================
 bash run_fsmn_ctc.sh --data_dir data_xlxl_0327_ctc_v1_clean --target_exp_dir exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --gpus 0,1,2,3 --dict_dir dict --checkpoint_dict dict --num_keywords 2599 --checkpoint_strict true 2 2
 bash run_fsmn_ctc.sh --data_dir data_xlxl_0327_ctc_v1_clean --target_exp_dir exp/fsmn_ctc_xlxl_0327_clean_baseline_2599_1gpu --gpus 0 --dict_dir dict --checkpoint_dict dict --num_keywords 2599 --checkpoint_strict true 2 2
 bash run_fsmn_ctc.sh --data_dir data_xlxl_0327_ctc_v1_clean --target_exp_dir exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --gpus 0 --dict_dir dict --checkpoint_dict dict --num_keywords 2599 --checkpoint_strict true 3 3
 
 # ====================================================================
-# 评测与分析
-# 说明：这里统一走 evaluate.sh，并显式指定小雷数据目录与关键词
+# baseline2599 评测：原始 test split
+# 作用：评测 baseline2599 的 79.pt 在 clean test 上的精度
 # ====================================================================
-bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --keywords "小雷小雷,小雷快拍" --gpu "0,1,2,3"
-python tools/prepare_xiaolei_eval_data.py --input-list /home/xushang/kws_ws/wekws/examples/hi_xiaowen/s0/datasets/test.list --output-dir codex_artifacts/xlxl_external_test_eval_max20 --max-duration 20.0 --keep-source-manifest
-bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --dataset test --data_dir codex_artifacts/xlxl_external_test_eval_max20 --keywords "小雷小雷" --result_suffix xlxl_external_test_79_max20 --gpu 2 --batch_size 32
-python wekws/bin/average_model.py --dst_model exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/avg_30.pt --src_path exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --num 30 --val_best
-bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/avg_30.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --keywords "小雷小雷,小雷快拍" --gpu 0
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --keywords "小雷小雷,小雷快拍" --gpu 0
+python examples/hi_xiaowen/s0/analyze_exp_test_stats.py --exp-dir examples/hi_xiaowen/s0/exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --test-id 79 --target-fa-per-hour 1.0 --pick-mode legacy
 
 # ====================================================================
-# 小雷专用 Top20 词表与 Weight Surgery（推荐下一步）
-# 说明：不要再用历史全局排序文件做 forced top20；这里改成先基于当前 clean 数据生成小雷专用排序文件，
-#      再生成 dict_top20_xlxl，后续 weight surgery / 蒸馏 / 评测统一复用这份 dict。
+# baseline2599 评测：生成并评测 avg_30
+# 作用：把 baseline2599 的最佳 30 个 checkpoint 平均后再评测
+# ====================================================================
+python wekws/bin/average_model.py --dst_model exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/avg_30.pt --src_path exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --num 30 --val_best
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/avg_30.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --keywords "小雷小雷,小雷快拍" --gpu 0
+python examples/hi_xiaowen/s0/analyze_exp_test_stats.py --exp-dir examples/hi_xiaowen/s0/exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --test-id avg_30 --target-fa-per-hour 1.0 --pick-mode legacy
+
+# ====================================================================
+# baseline2599 评测：外部 test.list
+# 作用：先把外部 test.list 转成当前评测格式，再评测 baseline2599 的 79.pt
+# ====================================================================
+python tools/prepare_xiaolei_eval_data.py --input-list /home/xushang/kws_ws/wekws/examples/hi_xiaowen/s0/datasets/test.list --output-dir codex_artifacts/xlxl_external_test_eval_max20 --max-duration 20.0 --keep-source-manifest
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --dataset test --data_dir codex_artifacts/xlxl_external_test_eval_max20 --keywords "小雷小雷" --result_suffix xlxl_external_test_79_max20 --gpu 2 --batch_size 32
+python examples/hi_xiaowen/s0/analyze_exp_test_stats.py --exp-dir examples/hi_xiaowen/s0/exp/fsmn_ctc_xlxl_0327_clean_baseline_2599 --test-id test_79_xlxl_external_test_79_max20 --target-fa-per-hour 1.0 --pick-mode legacy
+
+# ====================================================================
+# 小雷专用 Top20 词表：生成 sorted vocab 和 dict_top20_xlxl
+# 作用：从 clean 数据统计小雷专用 token 频次，并生成 top20 词表
 # ====================================================================
 python tools/build_sorted_vocab_from_data.py --data-dir data_xlxl_0327_ctc_v1_clean --dict dict/dict.txt --output dict/model_vocab_freq_asr_sorted_xlxl_clean.txt
 python tools/gen_reduced_dict.py --sorted_file "$(pwd)/dict/model_vocab_freq_asr_sorted_xlxl_clean.txt" --num_keywords 20 --output_dir "$(pwd)/dict_top20_xlxl"
 sed -n '1,24p' dict/model_vocab_freq_asr_sorted_xlxl_clean.txt
 sed -n '1,40p' dict_top20_xlxl/dict.txt
-# 注意：从 79.pt 出发时必须显式提高 max_epoch，否则会因默认 max_epoch=80 而直接退出
+
+# ====================================================================
+# Top20 weight surgery 训练：从 baseline2599 的 79.pt 继续训练到 159.pt
+# 作用：保留小雷 baseline 已学到的权重，做 top20 surgery 后继续训练 80 个 epoch
+# 注意：必须显式加 --max_epoch 160，否则会因默认 max_epoch=80 而直接退出
+# ====================================================================
 bash run_fsmn_ctc.sh --data_dir data_xlxl_0327_ctc_v1_clean --checkpoint exp/fsmn_ctc_xlxl_0327_clean_baseline_2599/79.pt --checkpoint_dict dict --target_exp_dir exp/fsmn_ctc_xlxl_top20_weight_surgery --gpus 0,1,2,3 --dict_dir dict_top20_xlxl --num_keywords 20 --checkpoint_strict false --max_epoch 160 2 2
-bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/79.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
-python examples/hi_xiaowen/s0/analyze_exp_test_stats.py --exp-dir examples/hi_xiaowen/s0/exp/fsmn_ctc_xlxl_top20_weight_surgery --test-id 79 --target-fa-per-hour 1.0 --pick-mode legacy
+
+# ====================================================================
+# Top20 weight surgery 评测：原始 test split 的 159.pt
+# 作用：评测当前 top20 surgery 主模型 159.pt
+# ====================================================================
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
+python examples/hi_xiaowen/s0/analyze_exp_test_stats.py --exp-dir examples/hi_xiaowen/s0/exp/fsmn_ctc_xlxl_top20_weight_surgery --test-id 159 --target-fa-per-hour 1.0 --pick-mode legacy
+
+# ====================================================================
+# Top20 weight surgery 评测：生成并评测 avg_30
+# 作用：把 top20 surgery 的最佳 30 个 checkpoint 平均后再评测
+# ====================================================================
 python wekws/bin/average_model.py --dst_model exp/fsmn_ctc_xlxl_top20_weight_surgery/avg_30.pt --src_path exp/fsmn_ctc_xlxl_top20_weight_surgery --num 30 --val_best
 bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/avg_30.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_top20_weight_surgery --test-id avg_30 --target-fa-per-hour 1.0 --pick-mode legacy
+
+# ====================================================================
+# Top20 weight surgery 评测：外部 test.list 的 159.pt
+# 作用：在外部数据上验证 top20 surgery 的泛化能力
+# ====================================================================
 python tools/prepare_xiaolei_eval_data.py --input-list /home/xushang/kws_ws/wekws/examples/hi_xiaowen/s0/datasets/test.list --output-dir codex_artifacts/xlxl_external_test_eval_max20 --max-duration 20.0 --keep-source-manifest
-bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/79.pt --dataset test --data_dir codex_artifacts/xlxl_external_test_eval_max20 --dict_dir dict_top20_xlxl --keywords "小雷小雷" --result_suffix xlxl_external_test_top20_79_max20 --gpu 2 --batch_size 32
-python examples/hi_xiaowen/s0/analyze_exp_test_stats.py --exp-dir examples/hi_xiaowen/s0/exp/fsmn_ctc_xlxl_top20_weight_surgery --test-id test_79_xlxl_external_test_top20_79_max20 --target-fa-per-hour 1.0 --pick-mode legacy
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --dataset test --data_dir codex_artifacts/xlxl_external_test_eval_max20 --dict_dir dict_top20_xlxl --keywords "小雷小雷" --result_suffix xlxl_external_test_top20_159_max20 --gpu 2 --batch_size 32
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_top20_weight_surgery --test-id test_159_xlxl_external_test_top20_159_max20 --target-fa-per-hour 1.0 --pick-mode legacy
 
 # ====================================================================
 # 蒸馏与压缩
