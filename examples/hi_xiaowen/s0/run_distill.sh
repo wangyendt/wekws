@@ -62,6 +62,7 @@ teacher_config=  # 为空则从 teacher_checkpoint 目录自动推导
 student_config=conf/fsmn_ctc_student_mini.yaml
 num_keywords=20
 dict_dir="dict_top20"
+data_dir="data"
 
 # ---- 断点继续训练 ----
 # student checkpoint to resume (e.g. exp/fsmn_ctc_distill_mini_align_20/79.pt)
@@ -103,6 +104,9 @@ num_average=30
 window_shift=50
 token_file="mobvoi_kws_transcription/tokens.txt"
 lexicon_file="mobvoi_kws_transcription/lexicon.txt"
+keywords="嗨小问,你好问问"
+test_gpu=0
+test_batch_size=256
 
 . tools/parse_options.sh || exit 1;
 
@@ -158,6 +162,7 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   echo "教师模型:           $teacher_checkpoint"
   echo "教师配置:           ${teacher_config:-auto}"
   echo "学生配置:           $student_config"
+  echo "数据目录:           $data_dir"
   echo "词表目录:           $dict_dir"
   echo "输出关键词数:       $num_keywords"
   echo "Phase 1 对齐 epoch: $align_epochs"
@@ -191,11 +196,13 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
     exit 1
   fi
 
+  mkdir -p $data_dir
+
   # 检查 CMVN 文件
-  if [ ! -f data/global_cmvn.kaldi ]; then
+  if [ ! -f ${data_dir}/global_cmvn.kaldi ]; then
     echo "CMVN 文件不存在，尝试从预训练模型复制..."
     if [ -f speech_charctc_kws_phone-xiaoyun/train/feature_transform.txt.80dim-l2r2 ]; then
-      cp speech_charctc_kws_phone-xiaoyun/train/feature_transform.txt.80dim-l2r2 data/global_cmvn.kaldi
+      cp speech_charctc_kws_phone-xiaoyun/train/feature_transform.txt.80dim-l2r2 ${data_dir}/global_cmvn.kaldi
     else
       echo "错误: 无法找到 CMVN 文件"
       exit 1
@@ -206,7 +213,7 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   mkdir -p $dir
 
   cmvn_opts=
-  $norm_mean && cmvn_opts="--cmvn_file data/global_cmvn.kaldi"
+  $norm_mean && cmvn_opts="--cmvn_file ${data_dir}/global_cmvn.kaldi"
   $norm_var && cmvn_opts="$cmvn_opts --norm_var"
 
   num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
@@ -232,8 +239,8 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$num_gpus \
     wekws/bin/train_distill.py --gpus $gpus \
       --config $student_config \
-      --train_data data/train/data.list \
-      --cv_data data/dev/data.list \
+      --train_data ${data_dir}/train/data.list \
+      --cv_data ${data_dir}/dev/data.list \
       --model_dir $dir \
       --num_workers 8 \
       --num_keywords $num_keywords \
@@ -277,6 +284,10 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
   echo "================================================"
   echo "Stage 3: 模型平均 + 评测"
   echo "================================================"
+  echo "测试数据目录:       $data_dir"
+  echo "测试关键词:         $keywords"
+  echo "测试 GPU:           $test_gpu"
+  echo "测试 batch size:    $test_batch_size"
   echo ""
 
   if $average_model; then
@@ -293,20 +304,21 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
     fi
   fi
 
-  result_dir=$dir/test_$(basename $score_checkpoint)
+  score_name=$(basename "$score_checkpoint" .pt)
+  result_dir=$dir/test_${score_name}
   mkdir -p $result_dir
 
   echo "推理评测中..."
   python wekws/bin/score_ctc.py \
     --config $dir/config.yaml \
-    --test_data data/test/data.list \
-    --gpu 0 \
-    --batch_size 256 \
+    --test_data ${data_dir}/test/data.list \
+    --gpu $test_gpu \
+    --batch_size $test_batch_size \
     --checkpoint $score_checkpoint \
     --dict $dict_dir \
     --score_file $result_dir/score.txt \
     --num_workers 8 \
-    --keywords "嗨小问,你好问问" \
+    --keywords "$keywords" \
     --token_file $token_file \
     --lexicon_file $lexicon_file
 
@@ -317,8 +329,8 @@ if [ ${stage_int} -le 3 ] && [ ${stop_stage_int} -ge 3 ]; then
 
   echo "计算 DET 曲线..."
   python wekws/bin/compute_det_ctc.py \
-    --keywords "嗨小问,你好问问" \
-    --test_data data/test/data.list \
+    --keywords "$keywords" \
+    --test_data ${data_dir}/test/data.list \
     --window_shift $window_shift \
     --step 0.001 \
     --score_file $result_dir/score.txt \
