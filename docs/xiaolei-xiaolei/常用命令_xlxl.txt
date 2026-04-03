@@ -125,3 +125,14 @@ python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k --test
 # ====================================================================
 # 导出与量化
 # ====================================================================
+
+# ====================================================================
+# 蒸馏与压缩：199K 首轮掉点后的补充命令
+# 作用：当前 avg_30 混入了 align phase ckpt；优先平均 finetune 阶段 100~119，并准备第二轮长 schedule
+# ====================================================================
+python wekws/bin/average_model.py --dst_model exp/fsmn_ctc_xlxl_distill_199k/avg_ft_20.pt --src_path exp/fsmn_ctc_xlxl_distill_199k --num 20 --val_best --min_epoch 100
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_distill_199k/avg_ft_20.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k --test-id avg_ft_20 --target-fa-per-hour 1.0 --pick-mode legacy
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_tuned --gpus 0,1,2,3 --align_epochs 200 --finetune_epochs 100 --head_lr_ratio 0.1 2 2
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_distill_199k_tuned/299.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_tuned --test-id 299 --target-fa-per-hour 1.0 --pick-mode legacy
