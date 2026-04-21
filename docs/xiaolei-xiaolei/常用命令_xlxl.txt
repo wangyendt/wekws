@@ -165,3 +165,11 @@ cd /home/wayne/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0 &
 python tools/summarize_xiaolei_miss_diagnosis.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k --test-id 119 --keyword 小雷小雷 --gpu 0
 python tools/summarize_xiaolei_miss_diagnosis.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_replay_from79 --test-id 229 --keyword 小雷小雷 --gpu 0
 python tools/summarize_xiaolei_miss_diagnosis.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_replay_from99 --test-id 229 --keyword 小雷小雷 --gpu 0
+
+# ====================================================================
+# 老师 vs 学生 logit/prob/prefix 曲线对比：只挑学生漏、老师收的样本，直接看 <blk>/<filler>/小/雷 与 小→小雷→小雷小→小雷小雷
+# 作用：验证“是不是 blank/filler 压住了前半段前缀”，不要只看 raw logit，必须同时看 softmax prob、prefix 曲线和 greedy/beam 结果
+# ====================================================================
+python tools/compare_xiaolei_miss_logits.py --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k --student-test-id 119 --keyword 小雷小雷 --teacher-filter detected_target --max-samples 10 --gpu 0
+python tools/compare_xiaolei_miss_logits.py --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_replay_from79 --student-test-id 229 --keyword 小雷小雷 --teacher-filter detected_target --max-samples 10 --gpu 0
+python tools/compare_xiaolei_miss_logits.py --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_replay_from99 --student-test-id 229 --keyword 小雷小雷 --teacher-filter detected_target --max-samples 10 --gpu 0
