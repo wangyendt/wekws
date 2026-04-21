@@ -136,3 +136,32 @@ python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k --test
 bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_tuned --gpus 0,1,2,3 --align_epochs 200 --finetune_epochs 100 --head_lr_ratio 0.1 2 2
 bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_distill_199k_tuned/299.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
 python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_tuned --test-id 299 --target-fa-per-hour 1.0 --pick-mode legacy
+
+
+# ====================================================================
+# 蒸馏与压缩：补齐 199K continuation seed sweep 的最后一条 replay_from99
+# 作用：from79 / from119 已完成且都未超过 119.pt；当前只补跑 from99，完成原计划里的 79/99/119 三点对比
+# ====================================================================
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --teacher_config exp/fsmn_ctc_xlxl_top20_weight_surgery/config.yaml --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_replay_from99 --gpus 0,1,2,3 --norm_mean true --norm_var true --seed 666 --checkpoint exp/fsmn_ctc_xlxl_distill_199k/99.pt --resume_lr 0.001 --align_epochs 180 --finetune_epochs 50 --finetune_lr 0.0001 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.5 --finetune_mse_weight_end 0.1 --layer_mapping "0:1,1:2,2:3" --lr_scheduler none 2 2
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_distill_199k_replay_from99/229.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_replay_from99 --test-id 229 --target-fa-per-hour 1.0 --pick-mode legacy
+# 只有 replay_from99 在原始 test split 上超过 119.pt，才继续补跑外部 test.list
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_distill_199k_replay_from99/229.pt --dataset test --data_dir codex_artifacts/xlxl_external_test_eval_max20 --dict_dir dict_top20_xlxl --keywords "小雷小雷" --result_suffix xlxl_external_test_distill199_replay99_229_max20 --gpu 2 --batch_size 32
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_replay_from99 --test-id test_229_xlxl_external_test_distill199_replay99_229_max20 --target-fa-per-hour 1.0 --pick-mode legacy
+
+# ====================================================================
+# 单条语音诊断：定位老师收、学生漏的具体原因
+# 作用：对同一条 wav 分别跑 199K 学生与 392K 老师，检查 greedy/beam/keyword path/blank-vs-nonblank
+# ====================================================================
+cd /home/wayne/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0 && python diagnose_wav.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --config exp/fsmn_ctc_xlxl_distill_199k/config.yaml --dict_dir dict_top20_xlxl --stats_dir exp/fsmn_ctc_xlxl_distill_199k/test_119 --keywords "小雷小雷,小雷快拍" --gpu 0 --beam_size 8 --frame_topk 8 --dump_dir exp/fsmn_ctc_xlxl_distill_199k/analysis/diagnose_student
+cd /home/wayne/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0 && python diagnose_wav.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --checkpoint exp/fsmn_ctc_xlxl_distill_199k_replay_from79/229.pt --config exp/fsmn_ctc_xlxl_distill_199k_replay_from79/config.yaml --dict_dir dict_top20_xlxl --stats_dir exp/fsmn_ctc_xlxl_distill_199k_replay_from79/test_229 --keywords "小雷小雷,小雷快拍" --gpu 0 --beam_size 8 --frame_topk 8 --dump_dir exp/fsmn_ctc_xlxl_distill_199k_replay_from79/analysis/diagnose_student
+cd /home/wayne/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0 && python diagnose_wav.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --checkpoint exp/fsmn_ctc_xlxl_distill_199k_replay_from99/229.pt --config exp/fsmn_ctc_xlxl_distill_199k_replay_from99/config.yaml --dict_dir dict_top20_xlxl --stats_dir exp/fsmn_ctc_xlxl_distill_199k_replay_from99/test_229 --keywords "小雷小雷,小雷快拍" --gpu 0 --beam_size 8 --frame_topk 8 --dump_dir exp/fsmn_ctc_xlxl_distill_199k_replay_from99/analysis/diagnose_student
+cd /home/wayne/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0 && python diagnose_wav.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --config exp/fsmn_ctc_xlxl_top20_weight_surgery/config.yaml --dict_dir dict_top20_xlxl --stats_dir exp/fsmn_ctc_xlxl_top20_weight_surgery/test_159 --keywords "小雷小雷,小雷快拍" --gpu 0 --beam_size 8 --frame_topk 8 --dump_dir exp/fsmn_ctc_xlxl_top20_weight_surgery/analysis/diagnose_teacher
+
+# ====================================================================
+# 批量漏检模式统计：统计小雷小雷漏检里有多少塌成“雷小雷”，以及 blank/小/雷 的强弱关系
+# 作用：先做模式统计，再决定是否值得做 hard positive replay / 样本加权 / posterior-path 约束
+# ====================================================================
+python tools/summarize_xiaolei_miss_diagnosis.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k --test-id 119 --keyword 小雷小雷 --gpu 0
+python tools/summarize_xiaolei_miss_diagnosis.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_replay_from79 --test-id 229 --keyword 小雷小雷 --gpu 0
+python tools/summarize_xiaolei_miss_diagnosis.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_replay_from99 --test-id 229 --keyword 小雷小雷 --gpu 0
