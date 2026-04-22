@@ -108,6 +108,49 @@ class DistillExecutor:
         total_loss = total_loss / len(layer_mapping)
         return total_loss
 
+    @staticmethod
+    def output_kd_loss(student_logits: torch.Tensor,
+                       teacher_logits: torch.Tensor,
+                       mask: torch.Tensor,
+                       temperature: float = 2.0) -> torch.Tensor:
+        """Compute masked teacher-student KL loss on output logits."""
+        if temperature <= 0:
+            raise ValueError(
+                f'temperature must be > 0, got {temperature}')
+
+        temp = float(temperature)
+        teacher_probs = F.softmax(teacher_logits.detach() / temp, dim=-1)
+        student_log_probs = F.log_softmax(student_logits / temp, dim=-1)
+        loss = F.kl_div(
+            student_log_probs, teacher_probs, reduction='none').sum(
+                dim=-1, keepdim=True)
+        valid = mask.sum().clamp_min(1.0)
+        return (loss * mask).sum() / valid * (temp**2)
+
+    @staticmethod
+    def blank_nonblank_kd_loss(student_logits: torch.Tensor,
+                               teacher_logits: torch.Tensor,
+                               mask: torch.Tensor,
+                               blank_id: int = 0,
+                               temperature: float = 2.0,
+                               eps: float = 1e-6) -> torch.Tensor:
+        """Match teacher blank-vs-nonblank behavior with BCE loss."""
+        if temperature <= 0:
+            raise ValueError(
+                f'temperature must be > 0, got {temperature}')
+
+        temp = float(temperature)
+        student_probs = F.softmax(student_logits / temp, dim=-1)
+        teacher_probs = F.softmax(teacher_logits.detach() / temp, dim=-1)
+        student_nonblank = (1.0 - student_probs[..., blank_id]).clamp(
+            min=eps, max=1.0 - eps)
+        teacher_nonblank = (1.0 - teacher_probs[..., blank_id]).clamp(
+            min=eps, max=1.0 - eps)
+        loss = F.binary_cross_entropy(
+            student_nonblank, teacher_nonblank, reduction='none')
+        valid = mask.sum().clamp_min(1.0)
+        return (loss.unsqueeze(-1) * mask).sum() / valid
+
     def train(self, teacher_model, student_model, optimizer, data_loader,
               device, writer, args):
         """Train one epoch with feature alignment distillation.
@@ -125,6 +168,9 @@ class DistillExecutor:
                 - 'min_duration'
                 - 'phase' (str, 'align' or 'finetune')
                 - 'mse_weight' (float, weight for MSE in finetune phase)
+                - 'kd_weight' (float, KL distillation weight in finetune)
+                - 'blank_kd_weight' (float, blank/nonblank KD weight)
+                - 'kd_temperature' (float, softmax temperature for KD)
                 - 'layer_mapping' (list of tuples)
         """
         student_model.train()
@@ -134,7 +180,11 @@ class DistillExecutor:
         min_duration = args.get('min_duration', 0)
         phase = args.get('phase', 'align')
         mse_weight = args.get('mse_weight', 1.0)
+        kd_weight = args.get('kd_weight', 0.0)
+        blank_kd_weight = args.get('blank_kd_weight', 0.0)
+        kd_temperature = args.get('kd_temperature', 2.0)
         layer_mapping = args.get('layer_mapping', [(0, 1), (1, 2), (2, 3)])
+        blank_id = args.get('blank_id', 0)
 
         for batch_idx, batch_dict in enumerate(data_loader):
             feats = batch_dict['feats'].to(device)
@@ -148,7 +198,7 @@ class DistillExecutor:
 
             # --- Teacher forward (frozen, no grad) ---
             with torch.no_grad():
-                _, _, t_block_outputs = \
+                z_t, _, t_block_outputs = \
                     _unwrap_model(teacher_model) \
                     .forward_with_block_outputs(feats)
 
@@ -166,6 +216,8 @@ class DistillExecutor:
                 # Phase 1: pure feature alignment
                 loss = loss_mse
                 loss_ctc_val = torch.tensor(0.0, device=device)
+                loss_kd = torch.tensor(0.0, device=device)
+                loss_blank_kd = torch.tensor(0.0, device=device)
                 acc = 0.0
             else:
                 # Phase 2: MSE + CTC
@@ -175,8 +227,25 @@ class DistillExecutor:
                     target_lengths=label_lengths,
                     min_duration=min_duration, validation=False)
                 loss_ctc_val = loss_ctc
-                loss = (mse_weight * loss_mse
-                        + (1.0 - mse_weight) * loss_ctc)
+                base_loss = (mse_weight * loss_mse
+                             + (1.0 - mse_weight) * loss_ctc)
+
+                if kd_weight > 0.0:
+                    loss_kd = self.output_kd_loss(
+                        z_s, z_t, mask, temperature=kd_temperature)
+                else:
+                    loss_kd = torch.tensor(0.0, device=device)
+
+                if blank_kd_weight > 0.0:
+                    loss_blank_kd = self.blank_nonblank_kd_loss(
+                        z_s, z_t, mask, blank_id=blank_id,
+                        temperature=kd_temperature)
+                else:
+                    loss_blank_kd = torch.tensor(0.0, device=device)
+
+                loss = (base_loss
+                        + kd_weight * loss_kd
+                        + blank_kd_weight * loss_blank_kd)
 
             optimizer.zero_grad()
             loss.backward()
@@ -193,10 +262,14 @@ class DistillExecutor:
                 else:
                     logging.debug(
                         'TRAIN Epoch %d Batch %d  [finetune]  '
-                        'mse %.6f  ctc %.6f  loss %.6f  acc %.6f  '
-                        'mse_w %.2f',
+                        'mse %.6f  ctc %.6f  kd %.6f  blank_kd %.6f  '
+                        'loss %.6f  acc %.6f  mse_w %.2f  kd_w %.2f  '
+                        'blank_w %.2f  T %.2f',
                         epoch, batch_idx, loss_mse.item(),
-                        loss_ctc_val.item(), loss.item(), acc, mse_weight)
+                        loss_ctc_val.item(), loss_kd.item(),
+                        loss_blank_kd.item(), loss.item(), acc,
+                        mse_weight, kd_weight, blank_kd_weight,
+                        kd_temperature)
 
     def cv(self, student_model, data_loader, device, args,
            teacher_model=None):
@@ -213,10 +286,16 @@ class DistillExecutor:
         epoch = args.get('epoch', 0)
         phase = args.get('phase', 'align')
         layer_mapping = args.get('layer_mapping', [(0, 1), (1, 2), (2, 3)])
+        kd_weight = args.get('kd_weight', 0.0)
+        blank_kd_weight = args.get('blank_kd_weight', 0.0)
+        kd_temperature = args.get('kd_temperature', 2.0)
+        blank_id = args.get('blank_id', 0)
 
         num_seen_utts = 1  # avoid /0
         total_ctc_loss = 0.0
         total_mse_loss = 0.0
+        total_kd_loss = 0.0
+        total_blank_kd_loss = 0.0
         total_acc = 0.0
 
         with torch.no_grad():
@@ -243,8 +322,10 @@ class DistillExecutor:
 
                 # MSE loss
                 mse_val = 0.0
+                kd_val = 0.0
+                blank_kd_val = 0.0
                 if teacher_model is not None:
-                    _, _, t_block_outputs = \
+                    z_t, _, t_block_outputs = \
                         _unwrap_model(teacher_model) \
                         .forward_with_block_outputs(feats)
                     mask = self._make_length_mask(feats_lengths,
@@ -252,22 +333,35 @@ class DistillExecutor:
                     mse_val = self.block_mse_loss(
                         s_block_outputs, t_block_outputs,
                         layer_mapping, mask).item()
+                    if phase == 'finetune' and kd_weight > 0.0:
+                        kd_val = self.output_kd_loss(
+                            z_s, z_t, mask,
+                            temperature=kd_temperature).item()
+                    if phase == 'finetune' and blank_kd_weight > 0.0:
+                        blank_kd_val = self.blank_nonblank_kd_loss(
+                            z_s, z_t, mask, blank_id=blank_id,
+                            temperature=kd_temperature).item()
 
                 if torch.isfinite(loss_ctc):
                     num_seen_utts += num_utts
                     total_ctc_loss += loss_ctc.item() * num_utts
                     total_mse_loss += mse_val * num_utts
+                    total_kd_loss += kd_val * num_utts
+                    total_blank_kd_loss += blank_kd_val * num_utts
                     total_acc += acc * num_utts
 
                 if batch_idx % log_interval == 0:
                     logging.debug(
                         'CV Epoch %d Batch %d  ctc %.6f  mse %.6f  '
-                        'acc %.6f  hist_ctc %.6f',
+                        'kd %.6f  blank_kd %.6f  acc %.6f  hist_ctc %.6f',
                         epoch, batch_idx, loss_ctc.item(), mse_val,
-                        acc, total_ctc_loss / num_seen_utts)
+                        kd_val, blank_kd_val, acc,
+                        total_ctc_loss / num_seen_utts)
 
         avg_ctc = total_ctc_loss / num_seen_utts
         avg_mse = total_mse_loss / num_seen_utts
+        avg_kd = total_kd_loss / num_seen_utts
+        avg_blank_kd = total_blank_kd_loss / num_seen_utts
         avg_acc = total_acc / num_seen_utts
 
         # In align phase, use MSE for scheduling; in finetune, use CTC
@@ -277,8 +371,9 @@ class DistillExecutor:
             cv_loss = avg_ctc
 
         logging.info(
-            'CV Epoch %d  cv_ctc %.6f  cv_mse %.6f  cv_acc %.6f  '
+            'CV Epoch %d  cv_ctc %.6f  cv_mse %.6f  cv_kd %.6f  '
+            'cv_blank_kd %.6f  cv_acc %.6f  '
             '[scheduled on %s = %.6f]',
-            epoch, avg_ctc, avg_mse, avg_acc,
+            epoch, avg_ctc, avg_mse, avg_kd, avg_blank_kd, avg_acc,
             'mse' if phase == 'align' else 'ctc', cv_loss)
         return cv_loss, avg_acc

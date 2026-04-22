@@ -6,7 +6,7 @@
 #
 # 两阶段训练：
 #   Phase 1 (align_epochs):    纯 MSE feature alignment，HEAD 冻结
-#   Phase 2 (finetune_epochs): MSE + CTC 混合，HEAD 解冻（极低学习率）
+#   Phase 2 (finetune_epochs): MSE + CTC + 可选 output KD，HEAD 解冻（极低学习率）
 #
 # 用法示例（选项参数必须放在位置参数之前）:
 #
@@ -96,6 +96,9 @@ finetune_lr=
 head_lr_ratio=0.01
 finetune_mse_weight_start=0.5
 finetune_mse_weight_end=0.1
+finetune_kd_weight=0.0
+finetune_blank_kd_weight=0.0
+kd_temperature=2.0
 layer_mapping="0:1,1:2,2:3"
 
 # ---- 评测参数 ----
@@ -170,6 +173,9 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   echo "Finetune lr:        ${finetune_lr:-keep}"
   echo "HEAD lr ratio:      $head_lr_ratio"
   echo "微调 MSE weight:    $finetune_mse_weight_start -> $finetune_mse_weight_end"
+  echo "微调 KD weight:     $finetune_kd_weight"
+  echo "Blank KD weight:    $finetune_blank_kd_weight"
+  echo "KD temperature:     $kd_temperature"
   echo "Layer mapping:      $layer_mapping"
   echo "Resume checkpoint:  ${checkpoint:-none}"
   echo "Resume lr override: ${resume_lr:-none}"
@@ -264,6 +270,9 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
       --head_lr_ratio $head_lr_ratio \
       --finetune_mse_weight_start $finetune_mse_weight_start \
       --finetune_mse_weight_end $finetune_mse_weight_end \
+      --finetune_kd_weight $finetune_kd_weight \
+      --finetune_blank_kd_weight $finetune_blank_kd_weight \
+      --kd_temperature $kd_temperature \
       --layer_mapping "$layer_mapping" \
       $cmvn_opts
 

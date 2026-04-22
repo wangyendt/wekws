@@ -13,14 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Feature alignment distillation training for CTC-based KWS models.
+"""Feature alignment + output distillation training for CTC-based KWS models.
 
 Two-phase training strategy:
     Phase 1 (feature alignment): Train student backbone to match teacher's
         block-level features via MSE loss. HEAD (out_linear1 + out_linear2)
         is copied from teacher and frozen.
     Phase 2 (fine-tuning): Unfreeze HEAD with very low learning rate.
-        Use MSE + CTC combined loss for end-to-end fine-tuning.
+        Use MSE + CTC + optional output-level KD losses for end-to-end
+        fine-tuning.
 
 Usage (launched via torch.distributed.run):
     python -m torch.distributed.run --standalone --nproc_per_node=4 \\
@@ -125,6 +126,13 @@ def get_args():
                         help='MSE weight at start of phase 2')
     parser.add_argument('--finetune_mse_weight_end', type=float, default=0.1,
                         help='MSE weight at end of phase 2')
+    parser.add_argument('--finetune_kd_weight', type=float, default=0.0,
+                        help='teacher-student output KL weight in phase 2')
+    parser.add_argument('--finetune_blank_kd_weight', type=float, default=0.0,
+                        help='teacher-student blank/non-blank KD weight in '
+                             'phase 2')
+    parser.add_argument('--kd_temperature', type=float, default=2.0,
+                        help='softmax temperature for output-level KD')
 
     # --- layer mapping ---
     parser.add_argument('--layer_mapping', default='0:1,1:2,2:3',
@@ -548,6 +556,10 @@ def main():
     training_config['layer_mapping'] = layer_mapping
     training_config['scheduler_start_epoch'] = scheduler_start_epoch
     training_config['lr_scheduler'] = args.lr_scheduler
+    training_config['kd_weight'] = args.finetune_kd_weight
+    training_config['blank_kd_weight'] = args.finetune_blank_kd_weight
+    training_config['kd_temperature'] = args.kd_temperature
+    training_config['blank_id'] = 0
 
     # ---- Print distillation config ----
     if rank == 0:
@@ -562,6 +574,11 @@ def main():
         print('  - HEAD lr ratio:       {}'.format(args.head_lr_ratio))
         print('  - Finetune MSE weight: {} -> {}'.format(
             args.finetune_mse_weight_start, args.finetune_mse_weight_end))
+        print('  - Finetune KD weight:  {}'.format(
+            args.finetune_kd_weight))
+        print('  - Blank KD weight:     {}'.format(
+            args.finetune_blank_kd_weight))
+        print('  - KD temperature:      {}'.format(args.kd_temperature))
         print('  - Layer mapping:       {}'.format(layer_mapping))
         print('  - LR scheduler:        {} (start_epoch={})'.format(
             args.lr_scheduler, scheduler_start_epoch))
@@ -638,8 +655,11 @@ def main():
                    if len(optimizer.param_groups) > 1 else 0.0)
         logging.info(
             'Epoch %d  [%s]  lr_backbone=%.6f  lr_head=%.6f  '
-            'mse_weight=%.2f',
-            epoch, phase, lr_backbone, lr_head, mse_weight)
+            'mse_weight=%.2f  kd_weight=%.2f  blank_kd_weight=%.2f  '
+            'kd_temperature=%.2f',
+            epoch, phase, lr_backbone, lr_head, mse_weight,
+            args.finetune_kd_weight, args.finetune_blank_kd_weight,
+            args.kd_temperature)
 
         executor.train(teacher_model, student_model, optimizer,
                        train_data_loader, device, writer, training_config)
@@ -659,6 +679,9 @@ def main():
                 'cv_loss': cv_loss,
                 'phase': phase,
                 'mse_weight': mse_weight,
+                'kd_weight': args.finetune_kd_weight,
+                'blank_kd_weight': args.finetune_blank_kd_weight,
+                'kd_temperature': args.kd_temperature,
             })
             if writer is not None:
                 writer.add_scalar('epoch/cv_loss', cv_loss, epoch)
@@ -666,6 +689,12 @@ def main():
                 writer.add_scalar('epoch/lr_backbone', lr_backbone, epoch)
                 writer.add_scalar('epoch/lr_head', lr_head, epoch)
                 writer.add_scalar('epoch/mse_weight', mse_weight, epoch)
+                writer.add_scalar('epoch/kd_weight',
+                                  args.finetune_kd_weight, epoch)
+                writer.add_scalar('epoch/blank_kd_weight',
+                                  args.finetune_blank_kd_weight, epoch)
+                writer.add_scalar('epoch/kd_temperature',
+                                  args.kd_temperature, epoch)
 
         final_epoch = epoch
         if scheduler is not None and epoch >= scheduler_start_epoch:
