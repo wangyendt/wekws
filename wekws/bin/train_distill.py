@@ -143,6 +143,13 @@ def get_args():
     parser.add_argument('--sample_weight_scope', default='all',
                         choices=['all', 'ctc_only'],
                         help='which loss branches consume sample weights')
+    parser.add_argument('--token_ce_file', default=None,
+                        help='optional JSON sidecar mapping sample key to '
+                             'teacher-aligned token peak targets')
+    parser.add_argument('--token_ce_weight', type=float, default=0.0,
+                        help='local token CE weight in finetune phase')
+    parser.add_argument('--token_ce_window', type=int, default=1,
+                        help='frame radius around each teacher token peak')
     parser.add_argument('--finetune_trainable_scope', default='all',
                         choices=['all', 'head_only'],
                         help='trainable scope during finetune phase')
@@ -192,6 +199,49 @@ def _load_sample_weight_map(path):
         raise ValueError(
             f'Expected JSON object for sample weight map, got {type(data)}')
     return {str(key): float(value) for key, value in data.items()}
+
+
+def _load_token_ce_target_map(path):
+    if path is None:
+        return {}
+    with open(path, 'r', encoding='utf-8') as fin:
+        data = json.load(fin)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f'Expected JSON object for token CE target map, got {type(data)}')
+    normalized = {}
+    for key, spec in data.items():
+        if not isinstance(spec, dict):
+            continue
+        targets = spec.get('targets', [])
+        if not isinstance(targets, list):
+            continue
+        clean_targets = []
+        for item in targets:
+            if not isinstance(item, dict):
+                continue
+            try:
+                frame = int(item['frame'])
+                token_id = int(item['token_id'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            clean = {
+                'frame': frame,
+                'token_id': token_id,
+            }
+            if 'token' in item:
+                clean['token'] = str(item['token'])
+            if 'prob' in item:
+                try:
+                    clean['prob'] = float(item['prob'])
+                except (TypeError, ValueError):
+                    pass
+            clean_targets.append(clean)
+        if clean_targets:
+            normalized[str(key)] = {
+                'targets': clean_targets,
+            }
+    return normalized
 
 
 def _resolve_teacher_config(args):
@@ -462,6 +512,7 @@ def main():
     layer_mapping = _parse_layer_mapping(args.layer_mapping)
     total_epochs = args.align_epochs + args.finetune_epochs
     sample_weight_map = _load_sample_weight_map(args.sample_weight_file)
+    token_ce_target_map = _load_token_ce_target_map(args.token_ce_file)
 
     scheduler_start_epoch = args.scheduler_start_epoch
     if scheduler_start_epoch < 0:
@@ -612,6 +663,9 @@ def main():
     training_config['sample_weight_map'] = sample_weight_map
     training_config['default_sample_weight'] = args.default_sample_weight
     training_config['sample_weight_scope'] = args.sample_weight_scope
+    training_config['token_ce_target_map'] = token_ce_target_map
+    training_config['token_ce_weight'] = args.token_ce_weight
+    training_config['token_ce_window'] = args.token_ce_window
     training_config['finetune_trainable_scope'] = \
         args.finetune_trainable_scope
 
@@ -639,10 +693,16 @@ def main():
             args.default_sample_weight))
         print('  - Sample weight scope: {}'.format(
             args.sample_weight_scope))
+        print('  - Token CE file:       {}'.format(
+            args.token_ce_file if args.token_ce_file else 'none'))
+        print('  - Token CE weight:     {}'.format(args.token_ce_weight))
+        print('  - Token CE window:     {}'.format(args.token_ce_window))
         print('  - Finetune scope:      {}'.format(
             args.finetune_trainable_scope))
         print('  - Weighted keys:       {}'.format(
             len(sample_weight_map)))
+        print('  - Token CE keys:       {}'.format(
+            len(token_ce_target_map)))
         print('  - Layer mapping:       {}'.format(layer_mapping))
         print('  - LR scheduler:        {} (start_epoch={})'.format(
             args.lr_scheduler, scheduler_start_epoch))
@@ -729,10 +789,10 @@ def main():
         logging.info(
             'Epoch %d  [%s]  lr_backbone=%.6f  lr_head=%.6f  '
             'mse_weight=%.2f  kd_weight=%.2f  blank_kd_weight=%.2f  '
-            'kd_temperature=%.2f',
+            'token_ce_weight=%.2f  kd_temperature=%.2f',
             epoch, phase, lr_backbone, lr_head, mse_weight,
             args.finetune_kd_weight, args.finetune_blank_kd_weight,
-            args.kd_temperature)
+            args.token_ce_weight, args.kd_temperature)
 
         executor.train(teacher_model, student_model, optimizer,
                        train_data_loader, device, writer, training_config)
@@ -754,6 +814,8 @@ def main():
                 'mse_weight': mse_weight,
                 'kd_weight': args.finetune_kd_weight,
                 'blank_kd_weight': args.finetune_blank_kd_weight,
+                'token_ce_weight': args.token_ce_weight,
+                'token_ce_window': args.token_ce_window,
                 'kd_temperature': args.kd_temperature,
             })
             if writer is not None:

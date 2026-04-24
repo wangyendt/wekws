@@ -185,6 +185,77 @@ class DistillExecutor:
             ).clamp_min(1e-8)
         return per_sample.mean()
 
+    @staticmethod
+    def local_token_ce_loss(student_logits: torch.Tensor,
+                            keys,
+                            lengths: torch.Tensor,
+                            target_map,
+                            window: int = 1,
+                            sample_weight: torch.Tensor = None
+                            ) -> torch.Tensor:
+        """Encourage selected tokens near teacher-aligned peak frames.
+
+        target_map format:
+            {
+              "utt_key": {
+                "targets": [
+                  {"frame": 55, "token_id": 2, "token": "小"},
+                  ...
+                ]
+              }
+            }
+
+        The loss uses max log-probability inside a small frame window, so it
+        constrains local token presence without overfitting to one exact frame.
+        """
+        if not target_map:
+            return torch.tensor(0.0, device=student_logits.device)
+
+        max_len = int(student_logits.size(1))
+        vocab_size = int(student_logits.size(2))
+        radius = max(0, int(window))
+        log_probs = F.log_softmax(student_logits, dim=-1)
+
+        losses = []
+        weights = []
+        for sample_index, key in enumerate(keys):
+            spec = target_map.get(str(key))
+            if not spec:
+                continue
+            valid_len = min(max_len, int(lengths[sample_index].item()))
+            if valid_len <= 0:
+                continue
+            sample_losses = []
+            for target in spec.get('targets', []):
+                try:
+                    frame = int(target['frame'])
+                    token_id = int(target['token_id'])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if token_id < 0 or token_id >= vocab_size:
+                    continue
+                start = max(0, frame - radius)
+                end = min(valid_len, frame + radius + 1)
+                if start >= end:
+                    continue
+                sample_losses.append(-log_probs[
+                    sample_index, start:end, token_id].max())
+            if not sample_losses:
+                continue
+            losses.append(torch.stack(sample_losses).mean())
+            if sample_weight is not None:
+                weights.append(sample_weight[sample_index])
+
+        if not losses:
+            return torch.tensor(0.0, device=student_logits.device)
+
+        per_sample = torch.stack(losses)
+        if sample_weight is not None and weights:
+            weight = torch.stack(weights).to(
+                device=per_sample.device, dtype=per_sample.dtype)
+            return (per_sample * weight).sum() / weight.sum().clamp_min(1e-8)
+        return per_sample.mean()
+
     def train(self, teacher_model, student_model, optimizer, data_loader,
               device, writer, args):
         """Train one epoch with feature alignment distillation.
@@ -220,6 +291,9 @@ class DistillExecutor:
         layer_mapping = args.get('layer_mapping', [(0, 1), (1, 2), (2, 3)])
         blank_id = args.get('blank_id', 0)
         sample_weight_scope = args.get('sample_weight_scope', 'all')
+        token_ce_weight = float(args.get('token_ce_weight', 0.0))
+        token_ce_window = int(args.get('token_ce_window', 1))
+        token_ce_target_map = args.get('token_ce_target_map') or {}
 
         for batch_idx, batch_dict in enumerate(data_loader):
             feats = batch_dict['feats'].to(device)
@@ -261,6 +335,7 @@ class DistillExecutor:
                 loss_ctc_val = torch.tensor(0.0, device=device)
                 loss_kd = torch.tensor(0.0, device=device)
                 loss_blank_kd = torch.tensor(0.0, device=device)
+                loss_token_ce = torch.tensor(0.0, device=device)
                 acc = 0.0
             else:
                 # Phase 2: MSE + CTC
@@ -289,9 +364,18 @@ class DistillExecutor:
                 else:
                     loss_blank_kd = torch.tensor(0.0, device=device)
 
+                if token_ce_weight > 0.0 and token_ce_target_map:
+                    loss_token_ce = self.local_token_ce_loss(
+                        z_s, batch_dict['keys'], feats_lengths,
+                        token_ce_target_map, window=token_ce_window,
+                        sample_weight=ctc_sample_weight)
+                else:
+                    loss_token_ce = torch.tensor(0.0, device=device)
+
                 loss = (base_loss
                         + kd_weight * loss_kd
-                        + blank_kd_weight * loss_blank_kd)
+                        + blank_kd_weight * loss_blank_kd
+                        + token_ce_weight * loss_token_ce)
 
             optimizer.zero_grad()
             loss.backward()
@@ -309,13 +393,15 @@ class DistillExecutor:
                     logging.debug(
                         'TRAIN Epoch %d Batch %d  [finetune]  '
                         'mse %.6f  ctc %.6f  kd %.6f  blank_kd %.6f  '
+                        'token_ce %.6f  '
                         'loss %.6f  acc %.6f  mse_w %.2f  kd_w %.2f  '
-                        'blank_w %.2f  T %.2f',
+                        'blank_w %.2f  token_w %.2f  T %.2f',
                         epoch, batch_idx, loss_mse.item(),
                         loss_ctc_val.item(), loss_kd.item(),
-                        loss_blank_kd.item(), loss.item(), acc,
+                        loss_blank_kd.item(), loss_token_ce.item(),
+                        loss.item(), acc,
                         mse_weight, kd_weight, blank_kd_weight,
-                        kd_temperature)
+                        token_ce_weight, kd_temperature)
 
     def cv(self, student_model, data_loader, device, args,
            teacher_model=None):
@@ -337,12 +423,16 @@ class DistillExecutor:
         kd_temperature = args.get('kd_temperature', 2.0)
         blank_id = args.get('blank_id', 0)
         sample_weight_scope = args.get('sample_weight_scope', 'all')
+        token_ce_weight = float(args.get('token_ce_weight', 0.0))
+        token_ce_window = int(args.get('token_ce_window', 1))
+        token_ce_target_map = args.get('token_ce_target_map') or {}
 
         num_seen_utts = 1  # avoid /0
         total_ctc_loss = 0.0
         total_mse_loss = 0.0
         total_kd_loss = 0.0
         total_blank_kd_loss = 0.0
+        total_token_ce_loss = 0.0
         total_acc = 0.0
 
         with torch.no_grad():
@@ -379,6 +469,7 @@ class DistillExecutor:
                 mse_val = 0.0
                 kd_val = 0.0
                 blank_kd_val = 0.0
+                token_ce_val = 0.0
                 if teacher_model is not None:
                     z_t, _, t_block_outputs = \
                         _unwrap_model(teacher_model) \
@@ -399,6 +490,12 @@ class DistillExecutor:
                             z_s, z_t, mask, blank_id=blank_id,
                             temperature=kd_temperature,
                             sample_weight=kd_sample_weight).item()
+                    if (phase == 'finetune' and token_ce_weight > 0.0
+                            and token_ce_target_map):
+                        token_ce_val = self.local_token_ce_loss(
+                            z_s, batch_dict['keys'], feats_lengths,
+                            token_ce_target_map, window=token_ce_window,
+                            sample_weight=ctc_sample_weight).item()
 
                 if torch.isfinite(loss_ctc):
                     num_seen_utts += num_utts
@@ -406,20 +503,23 @@ class DistillExecutor:
                     total_mse_loss += mse_val * num_utts
                     total_kd_loss += kd_val * num_utts
                     total_blank_kd_loss += blank_kd_val * num_utts
+                    total_token_ce_loss += token_ce_val * num_utts
                     total_acc += acc * num_utts
 
                 if batch_idx % log_interval == 0:
                     logging.debug(
                         'CV Epoch %d Batch %d  ctc %.6f  mse %.6f  '
-                        'kd %.6f  blank_kd %.6f  acc %.6f  hist_ctc %.6f',
+                        'kd %.6f  blank_kd %.6f  token_ce %.6f  '
+                        'acc %.6f  hist_ctc %.6f',
                         epoch, batch_idx, loss_ctc.item(), mse_val,
-                        kd_val, blank_kd_val, acc,
+                        kd_val, blank_kd_val, token_ce_val, acc,
                         total_ctc_loss / num_seen_utts)
 
         avg_ctc = total_ctc_loss / num_seen_utts
         avg_mse = total_mse_loss / num_seen_utts
         avg_kd = total_kd_loss / num_seen_utts
         avg_blank_kd = total_blank_kd_loss / num_seen_utts
+        avg_token_ce = total_token_ce_loss / num_seen_utts
         avg_acc = total_acc / num_seen_utts
 
         # In align phase, use MSE for scheduling; in finetune, use CTC
@@ -430,8 +530,9 @@ class DistillExecutor:
 
         logging.info(
             'CV Epoch %d  cv_ctc %.6f  cv_mse %.6f  cv_kd %.6f  '
-            'cv_blank_kd %.6f  cv_acc %.6f  '
+            'cv_blank_kd %.6f  cv_token_ce %.6f  cv_acc %.6f  '
             '[scheduled on %s = %.6f]',
-            epoch, avg_ctc, avg_mse, avg_kd, avg_blank_kd, avg_acc,
+            epoch, avg_ctc, avg_mse, avg_kd, avg_blank_kd, avg_token_ce,
+            avg_acc,
             'mse' if phase == 'align' else 'ctc', cv_loss)
         return cv_loss, avg_acc

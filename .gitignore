@@ -48,4 +48,5 @@ rayneo_hotword_tflm/
 examples/hi_xiaowen/s0/data_xlxl_0327_ctc_v1_clean_hardpos_replay_v*/
 examples/hi_xiaowen/s0/data_xlxl_0327_ctc_v1_clean_prefixstart_replay_v*/
 examples/hi_xiaowen/s0/data_xlxl_0327_ctc_v1_clean_repeatedseq_replay_v*/
+examples/hi_xiaowen/s0/data_xlxl_0327_ctc_v1_clean_repeatedseq_gap*_v*/
 examples/hi_xiaowen/s0/codex_artifacts/xlxl_autorun/

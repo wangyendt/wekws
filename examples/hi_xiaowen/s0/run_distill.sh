@@ -102,6 +102,9 @@ kd_temperature=2.0
 sample_weight_file=
 default_sample_weight=1.0
 sample_weight_scope=all
+token_ce_file=
+token_ce_weight=0.0
+token_ce_window=1
 finetune_trainable_scope=all
 layer_mapping="0:1,1:2,2:3"
 
@@ -183,6 +186,9 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   echo "Sample weight file: ${sample_weight_file:-none}"
   echo "Default sample w:   $default_sample_weight"
   echo "Sample weight scope:$sample_weight_scope"
+  echo "Token CE file:      ${token_ce_file:-none}"
+  echo "Token CE weight:    $token_ce_weight"
+  echo "Token CE window:    $token_ce_window"
   echo "Finetune scope:     $finetune_trainable_scope"
   echo "Layer mapping:      $layer_mapping"
   echo "Resume checkpoint:  ${checkpoint:-none}"
@@ -253,6 +259,10 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   if [ -n "$sample_weight_file" ]; then
     sample_weight_opt="--sample_weight_file $sample_weight_file"
   fi
+  token_ce_opt=
+  if [ -n "$token_ce_file" ]; then
+    token_ce_opt="--token_ce_file $token_ce_file"
+  fi
 
   python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$num_gpus \
     wekws/bin/train_distill.py --gpus $gpus \
@@ -288,6 +298,9 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
       $sample_weight_opt \
       --default_sample_weight $default_sample_weight \
       --sample_weight_scope $sample_weight_scope \
+      $token_ce_opt \
+      --token_ce_weight $token_ce_weight \
+      --token_ce_window $token_ce_window \
       --finetune_trainable_scope $finetune_trainable_scope \
       --layer_mapping "$layer_mapping" \
       $cmvn_opts

@@ -59,6 +59,18 @@ def parse_args():
         help="number of utterances for calibration representative dataset",
     )
     parser.add_argument(
+        "--max_calib_steps",
+        type=int,
+        default=0,
+        help="maximum streaming frames collected for calibration; <=0 means all frames from selected utterances",
+    )
+    parser.add_argument(
+        "--calib_backend",
+        choices=["torch", "onnxruntime"],
+        default="torch",
+        help="backend used to roll cache states for calibration data",
+    )
+    parser.add_argument(
         "--calib_data",
         default=str(DEFAULT_CALIB_DATA),
         help="calibration data.list path",
@@ -169,6 +181,9 @@ def prepare_calibration_data(
     seed: int,
     tmp_dir: Path,
     input_dim: int,
+    onnx_path: Path | None = None,
+    max_calib_steps: int = 0,
+    calib_backend: str = "torch",
 ) -> tuple[Path, Path]:
     """Prepare .npy calibration files for onnx2tf.
 
@@ -180,6 +195,16 @@ def prepare_calibration_data(
     feats_list = []
     cache_list = []
 
+    ort_session = None
+    if calib_backend == "onnxruntime":
+        if onnx_path is None:
+            raise ValueError("onnx_path is required when calib_backend=onnxruntime")
+        import onnxruntime as ort
+
+        ort_session = ort.InferenceSession(str(onnx_path))
+    elif calib_backend != "torch":
+        raise ValueError(f"unsupported calib_backend: {calib_backend}")
+
     with torch.no_grad():
         for item_index, item in enumerate(calib_items, start=1):
             wav_key = item.get("wav")
@@ -187,16 +212,36 @@ def prepare_calibration_data(
                 raise KeyError(f"Calibration item missing 'wav' field: {item}")
             wav_path = iw.to_abs_path(wav_key)
             feats = iw.build_input_features(wav_path, configs).cpu()
-            cache = torch.zeros(cache_shape, dtype=torch.float32)
+            torch_cache = torch.zeros(cache_shape, dtype=torch.float32)
+            ort_cache = np.zeros(cache_shape, dtype=np.float32)
 
             for start in range(feats.size(1)):
                 frame = feats[:, start:start + 1, :]
-                _, cache = wrapper(frame, cache)
                 feats_list.append(frame.numpy().astype(np.float32))
-                cache_list.append(cache.numpy().astype(np.float32))
+                if calib_backend == "onnxruntime":
+                    _, ort_cache = ort_session.run(
+                        None,
+                        {
+                            "feats": frame.numpy().astype(np.float32),
+                            "cache": ort_cache,
+                        },
+                    )
+                    cache_list.append(ort_cache.astype(np.float32))
+                else:
+                    _, torch_cache = wrapper(frame, torch_cache)
+                    cache_list.append(torch_cache.numpy().astype(np.float32))
+
+                if max_calib_steps > 0 and len(feats_list) >= max_calib_steps:
+                    break
 
             if item_index % 50 == 0 or item_index == len(calib_items):
                 print(f"  collected {len(feats_list)} steps from {item_index}/{len(calib_items)} utterances")
+
+            if max_calib_steps > 0 and len(feats_list) >= max_calib_steps:
+                print(
+                    f"  reached max_calib_steps={max_calib_steps} at utterance {item_index}/{len(calib_items)}"
+                )
+                break
 
     feats_array = np.concatenate(feats_list, axis=0)
     cache_array = np.concatenate(cache_list, axis=0)
@@ -247,7 +292,14 @@ def convert_onnx_to_int8_tflite(
         disable_model_save=False,
     )
 
-    integer_quant_path = work_dir / "399_stream_step_integer_quant.tflite"
+    integer_quant_path = work_dir / f"{onnx_path.stem}_integer_quant.tflite"
+    if not integer_quant_path.exists():
+        candidates = sorted(
+            path for path in work_dir.glob("*_integer_quant.tflite")
+            if "int16_act" not in path.name
+        )
+        if candidates:
+            integer_quant_path = candidates[0]
     if not integer_quant_path.exists():
         # Fallback: try the default name from older onnx2tf versions
         integer_quant_path = work_dir / "model_integer_quant.tflite"
@@ -317,6 +369,9 @@ def main():
         seed=args.seed,
         tmp_dir=tmp_dir,
         input_dim=input_dim,
+        onnx_path=onnx_path,
+        max_calib_steps=args.max_calib_steps,
+        calib_backend=args.calib_backend,
     )
 
     # Step 3: ONNX → TFLite INT8 via onnx2tf
@@ -346,6 +401,8 @@ def main():
             "cache_shape": list(cache_shape),
             "calib_data": str(calib_data_path),
             "num_calib": args.num_calib,
+            "max_calib_steps": args.max_calib_steps,
+            "calib_backend": args.calib_backend,
             "seed": args.seed,
         }
         meta_path = output_path.with_suffix(output_path.suffix + ".json")
