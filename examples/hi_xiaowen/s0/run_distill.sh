@@ -99,6 +99,10 @@ finetune_mse_weight_end=0.1
 finetune_kd_weight=0.0
 finetune_blank_kd_weight=0.0
 kd_temperature=2.0
+sample_weight_file=
+default_sample_weight=1.0
+sample_weight_scope=all
+finetune_trainable_scope=all
 layer_mapping="0:1,1:2,2:3"
 
 # ---- 评测参数 ----
@@ -176,6 +180,10 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   echo "微调 KD weight:     $finetune_kd_weight"
   echo "Blank KD weight:    $finetune_blank_kd_weight"
   echo "KD temperature:     $kd_temperature"
+  echo "Sample weight file: ${sample_weight_file:-none}"
+  echo "Default sample w:   $default_sample_weight"
+  echo "Sample weight scope:$sample_weight_scope"
+  echo "Finetune scope:     $finetune_trainable_scope"
   echo "Layer mapping:      $layer_mapping"
   echo "Resume checkpoint:  ${checkpoint:-none}"
   echo "Resume lr override: ${resume_lr:-none}"
@@ -241,6 +249,10 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
   if [ -n "$finetune_lr" ]; then
     finetune_lr_opt="--finetune_lr $finetune_lr"
   fi
+  sample_weight_opt=
+  if [ -n "$sample_weight_file" ]; then
+    sample_weight_opt="--sample_weight_file $sample_weight_file"
+  fi
 
   python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=$num_gpus \
     wekws/bin/train_distill.py --gpus $gpus \
@@ -273,6 +285,10 @@ if [ ${stage_int} -le 2 ] && [ ${stop_stage_int} -ge 2 ]; then
       --finetune_kd_weight $finetune_kd_weight \
       --finetune_blank_kd_weight $finetune_blank_kd_weight \
       --kd_temperature $kd_temperature \
+      $sample_weight_opt \
+      --default_sample_weight $default_sample_weight \
+      --sample_weight_scope $sample_weight_scope \
+      --finetune_trainable_scope $finetune_trainable_scope \
       --layer_mapping "$layer_mapping" \
       $cmvn_opts
 

@@ -43,6 +43,7 @@ from __future__ import print_function
 
 import argparse
 import copy
+import json
 import logging
 import os
 
@@ -133,6 +134,18 @@ def get_args():
                              'phase 2')
     parser.add_argument('--kd_temperature', type=float, default=2.0,
                         help='softmax temperature for output-level KD')
+    parser.add_argument('--sample_weight_file', default=None,
+                        help='optional JSON file mapping sample key to '
+                             'sample weight')
+    parser.add_argument('--default_sample_weight', type=float, default=1.0,
+                        help='default weight for samples not found in '
+                             '--sample_weight_file')
+    parser.add_argument('--sample_weight_scope', default='all',
+                        choices=['all', 'ctc_only'],
+                        help='which loss branches consume sample weights')
+    parser.add_argument('--finetune_trainable_scope', default='all',
+                        choices=['all', 'head_only'],
+                        help='trainable scope during finetune phase')
 
     # --- layer mapping ---
     parser.add_argument('--layer_mapping', default='0:1,1:2,2:3',
@@ -168,6 +181,17 @@ def _parse_layer_mapping(mapping_str):
         s, t = pair.strip().split(':')
         pairs.append((int(s), int(t)))
     return pairs
+
+
+def _load_sample_weight_map(path):
+    if path is None:
+        return {}
+    with open(path, 'r', encoding='utf-8') as fin:
+        data = json.load(fin)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f'Expected JSON object for sample weight map, got {type(data)}')
+    return {str(key): float(value) for key, value in data.items()}
 
 
 def _resolve_teacher_config(args):
@@ -291,7 +315,25 @@ def _unfreeze_head(model):
     return unfrozen_count
 
 
-def _get_param_groups(model, base_lr, head_lr_ratio):
+def _freeze_backbone_keep_head(model):
+    """Freeze non-head parameters and keep HEAD trainable."""
+    backbone = model.module.backbone \
+        if hasattr(model, 'module') else model.backbone
+    frozen_count = 0
+    head_count = 0
+    for name, param in backbone.named_parameters():
+        is_head = 'out_linear1' in name or 'out_linear2' in name
+        param.requires_grad = is_head
+        if is_head:
+            head_count += param.numel()
+        else:
+            frozen_count += param.numel()
+    logging.info('Frozen non-HEAD backbone: %d parameters', frozen_count)
+    logging.info('Kept HEAD trainable: %d parameters', head_count)
+    return frozen_count, head_count
+
+
+def _get_param_groups(model, base_lr, head_lr_ratio, finetune_trainable_scope):
     """Create parameter groups with different learning rates.
 
     Returns:
@@ -312,6 +354,12 @@ def _get_param_groups(model, base_lr, head_lr_ratio):
     for param in model.parameters():
         if id(param) not in head_param_ids and param.requires_grad:
             backbone_params.append(param)
+
+    if finetune_trainable_scope == 'head_only':
+        return [
+            {'params': backbone_params, 'lr': 0.0, 'name': 'backbone_frozen'},
+            {'params': head_params, 'lr': base_lr, 'name': 'head'},
+        ]
 
     param_groups = [
         {'params': backbone_params, 'lr': base_lr, 'name': 'backbone'},
@@ -413,6 +461,7 @@ def main():
 
     layer_mapping = _parse_layer_mapping(args.layer_mapping)
     total_epochs = args.align_epochs + args.finetune_epochs
+    sample_weight_map = _load_sample_weight_map(args.sample_weight_file)
 
     scheduler_start_epoch = args.scheduler_start_epoch
     if scheduler_start_epoch < 0:
@@ -560,6 +609,11 @@ def main():
     training_config['blank_kd_weight'] = args.finetune_blank_kd_weight
     training_config['kd_temperature'] = args.kd_temperature
     training_config['blank_id'] = 0
+    training_config['sample_weight_map'] = sample_weight_map
+    training_config['default_sample_weight'] = args.default_sample_weight
+    training_config['sample_weight_scope'] = args.sample_weight_scope
+    training_config['finetune_trainable_scope'] = \
+        args.finetune_trainable_scope
 
     # ---- Print distillation config ----
     if rank == 0:
@@ -579,6 +633,16 @@ def main():
         print('  - Blank KD weight:     {}'.format(
             args.finetune_blank_kd_weight))
         print('  - KD temperature:      {}'.format(args.kd_temperature))
+        print('  - Sample weight file:  {}'.format(
+            args.sample_weight_file if args.sample_weight_file else 'none'))
+        print('  - Default sample w:    {}'.format(
+            args.default_sample_weight))
+        print('  - Sample weight scope: {}'.format(
+            args.sample_weight_scope))
+        print('  - Finetune scope:      {}'.format(
+            args.finetune_trainable_scope))
+        print('  - Weighted keys:       {}'.format(
+            len(sample_weight_map)))
         print('  - Layer mapping:       {}'.format(layer_mapping))
         print('  - LR scheduler:        {} (start_epoch={})'.format(
             args.lr_scheduler, scheduler_start_epoch))
@@ -634,12 +698,21 @@ def main():
                                  '(was %.6f)', base_lr, current_lr)
                 else:
                     logging.info('Current backbone lr: %.6f', current_lr)
-                logging.info('HEAD lr will be: %.6f',
-                             base_lr * args.head_lr_ratio)
+
+                if args.finetune_trainable_scope == 'head_only':
+                    _freeze_backbone_keep_head(student_model)
+                    logging.info('Finetune trainable scope: head_only')
+                    logging.info('HEAD lr will be: %.6f', base_lr)
+                else:
+                    logging.info('HEAD lr will be: %.6f',
+                                 base_lr * args.head_lr_ratio)
 
                 # Create new optimizer with param groups
                 param_groups = _get_param_groups(
-                    student_model, base_lr, args.head_lr_ratio)
+                    student_model,
+                    base_lr,
+                    args.head_lr_ratio,
+                    args.finetune_trainable_scope)
                 # Preserve weight_decay from config
                 wd = configs['optim_conf'].get('weight_decay', 0.0001)
                 optimizer = optim.Adam(param_groups, weight_decay=wd)

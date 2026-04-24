@@ -64,8 +64,16 @@ class DistillExecutor:
         return mask.unsqueeze(-1).float()
 
     @staticmethod
+    def _resolve_sample_weights(keys, args, device):
+        """Resolve per-sample weights from batch keys."""
+        default_weight = float(args.get('default_sample_weight', 1.0))
+        weight_map = args.get('sample_weight_map') or {}
+        weights = [float(weight_map.get(key, default_weight)) for key in keys]
+        return torch.tensor(weights, dtype=torch.float32, device=device)
+
+    @staticmethod
     def block_mse_loss(student_block_outputs, teacher_block_outputs,
-                       layer_mapping, mask):
+                       layer_mapping, mask, sample_weight=None):
         """Compute averaged MSE loss across mapped block pairs.
 
         Args:
@@ -96,14 +104,23 @@ class DistillExecutor:
 
         total_loss = torch.tensor(
             0.0, device=student_block_outputs[0].device)
+        mask_sum = mask.squeeze(-1).sum(dim=1).clamp_min(1.0)
+        if sample_weight is not None:
+            sample_weight = sample_weight.to(
+                device=student_block_outputs[0].device,
+                dtype=student_block_outputs[0].dtype)
+            weight_sum = sample_weight.sum().clamp_min(1e-8)
         for s_idx, t_idx in layer_mapping:
             s_feat = student_block_outputs[s_idx]  # (B, T, D)
             t_feat = teacher_block_outputs[t_idx].detach()  # (B, T, D)
             # MSE per element, masked
             diff = (s_feat - t_feat) ** 2  # (B, T, D)
             diff = diff * mask  # mask out padding frames
-            # Average over valid (frame, dim) entries
-            loss = diff.sum() / (mask.sum() * s_feat.size(-1))
+            per_sample = diff.sum(dim=(1, 2)) / (mask_sum * s_feat.size(-1))
+            if sample_weight is not None:
+                loss = (per_sample * sample_weight).sum() / weight_sum
+            else:
+                loss = per_sample.mean()
             total_loss = total_loss + loss
         total_loss = total_loss / len(layer_mapping)
         return total_loss
@@ -112,7 +129,8 @@ class DistillExecutor:
     def output_kd_loss(student_logits: torch.Tensor,
                        teacher_logits: torch.Tensor,
                        mask: torch.Tensor,
-                       temperature: float = 2.0) -> torch.Tensor:
+                       temperature: float = 2.0,
+                       sample_weight: torch.Tensor = None) -> torch.Tensor:
         """Compute masked teacher-student KL loss on output logits."""
         if temperature <= 0:
             raise ValueError(
@@ -124,8 +142,15 @@ class DistillExecutor:
         loss = F.kl_div(
             student_log_probs, teacher_probs, reduction='none').sum(
                 dim=-1, keepdim=True)
-        valid = mask.sum().clamp_min(1.0)
-        return (loss * mask).sum() / valid * (temp**2)
+        per_sample = ((loss * mask).sum(dim=(1, 2))
+                      / mask.squeeze(-1).sum(dim=1).clamp_min(1.0))
+        if sample_weight is not None:
+            sample_weight = sample_weight.to(
+                device=per_sample.device,
+                dtype=per_sample.dtype)
+            return (per_sample * sample_weight).sum() / sample_weight.sum(
+            ).clamp_min(1e-8) * (temp**2)
+        return per_sample.mean() * (temp**2)
 
     @staticmethod
     def blank_nonblank_kd_loss(student_logits: torch.Tensor,
@@ -133,7 +158,9 @@ class DistillExecutor:
                                mask: torch.Tensor,
                                blank_id: int = 0,
                                temperature: float = 2.0,
-                               eps: float = 1e-6) -> torch.Tensor:
+                               eps: float = 1e-6,
+                               sample_weight: torch.Tensor = None
+                               ) -> torch.Tensor:
         """Match teacher blank-vs-nonblank behavior with BCE loss."""
         if temperature <= 0:
             raise ValueError(
@@ -148,8 +175,15 @@ class DistillExecutor:
             min=eps, max=1.0 - eps)
         loss = F.binary_cross_entropy(
             student_nonblank, teacher_nonblank, reduction='none')
-        valid = mask.sum().clamp_min(1.0)
-        return (loss.unsqueeze(-1) * mask).sum() / valid
+        per_sample = ((loss.unsqueeze(-1) * mask).sum(dim=(1, 2))
+                      / mask.squeeze(-1).sum(dim=1).clamp_min(1.0))
+        if sample_weight is not None:
+            sample_weight = sample_weight.to(
+                device=per_sample.device,
+                dtype=per_sample.dtype)
+            return (per_sample * sample_weight).sum() / sample_weight.sum(
+            ).clamp_min(1e-8)
+        return per_sample.mean()
 
     def train(self, teacher_model, student_model, optimizer, data_loader,
               device, writer, args):
@@ -185,6 +219,7 @@ class DistillExecutor:
         kd_temperature = args.get('kd_temperature', 2.0)
         layer_mapping = args.get('layer_mapping', [(0, 1), (1, 2), (2, 3)])
         blank_id = args.get('blank_id', 0)
+        sample_weight_scope = args.get('sample_weight_scope', 'all')
 
         for batch_idx, batch_dict in enumerate(data_loader):
             feats = batch_dict['feats'].to(device)
@@ -192,6 +227,13 @@ class DistillExecutor:
             target = target[:, 0] if target.shape[1] == 1 else target
             feats_lengths = batch_dict['feats_lengths'].to(device)
             label_lengths = batch_dict['target_lengths'].to(device)
+            sample_weight = self._resolve_sample_weights(
+                batch_dict['keys'], args, device)
+            align_sample_weight = (
+                sample_weight if sample_weight_scope == 'all' else None)
+            ctc_sample_weight = sample_weight
+            kd_sample_weight = (
+                sample_weight if sample_weight_scope == 'all' else None)
             num_utts = feats_lengths.size(0)
             if num_utts == 0:
                 continue
@@ -210,7 +252,8 @@ class DistillExecutor:
             # --- Block-level MSE loss ---
             mask = self._make_length_mask(feats_lengths, z_s.size(1))
             loss_mse = self.block_mse_loss(
-                s_block_outputs, t_block_outputs, layer_mapping, mask)
+                s_block_outputs, t_block_outputs, layer_mapping, mask,
+                sample_weight=align_sample_weight)
 
             if phase == 'align':
                 # Phase 1: pure feature alignment
@@ -225,21 +268,24 @@ class DistillExecutor:
                 loss_ctc, acc = criterion(
                     loss_type, z_s, target, feats_lengths,
                     target_lengths=label_lengths,
-                    min_duration=min_duration, validation=False)
+                    min_duration=min_duration, validation=False,
+                    sample_weight=ctc_sample_weight)
                 loss_ctc_val = loss_ctc
                 base_loss = (mse_weight * loss_mse
                              + (1.0 - mse_weight) * loss_ctc)
 
                 if kd_weight > 0.0:
                     loss_kd = self.output_kd_loss(
-                        z_s, z_t, mask, temperature=kd_temperature)
+                        z_s, z_t, mask, temperature=kd_temperature,
+                        sample_weight=kd_sample_weight)
                 else:
                     loss_kd = torch.tensor(0.0, device=device)
 
                 if blank_kd_weight > 0.0:
                     loss_blank_kd = self.blank_nonblank_kd_loss(
                         z_s, z_t, mask, blank_id=blank_id,
-                        temperature=kd_temperature)
+                        temperature=kd_temperature,
+                        sample_weight=kd_sample_weight)
                 else:
                     loss_blank_kd = torch.tensor(0.0, device=device)
 
@@ -290,6 +336,7 @@ class DistillExecutor:
         blank_kd_weight = args.get('blank_kd_weight', 0.0)
         kd_temperature = args.get('kd_temperature', 2.0)
         blank_id = args.get('blank_id', 0)
+        sample_weight_scope = args.get('sample_weight_scope', 'all')
 
         num_seen_utts = 1  # avoid /0
         total_ctc_loss = 0.0
@@ -305,6 +352,13 @@ class DistillExecutor:
                 target = target[:, 0] if target.shape[1] == 1 else target
                 feats_lengths = batch_dict['feats_lengths'].to(device)
                 label_lengths = batch_dict['target_lengths'].to(device)
+                sample_weight = self._resolve_sample_weights(
+                    batch_dict['keys'], args, device)
+                align_sample_weight = (
+                    sample_weight if sample_weight_scope == 'all' else None)
+                ctc_sample_weight = sample_weight
+                kd_sample_weight = (
+                    sample_weight if sample_weight_scope == 'all' else None)
                 num_utts = feats_lengths.size(0)
                 if num_utts == 0:
                     continue
@@ -318,7 +372,8 @@ class DistillExecutor:
                     args.get('criterion', 'ctc'),
                     z_s, target, feats_lengths,
                     target_lengths=label_lengths,
-                    min_duration=0, validation=True)
+                    min_duration=0, validation=True,
+                    sample_weight=ctc_sample_weight)
 
                 # MSE loss
                 mse_val = 0.0
@@ -332,15 +387,18 @@ class DistillExecutor:
                                                   z_s.size(1))
                     mse_val = self.block_mse_loss(
                         s_block_outputs, t_block_outputs,
-                        layer_mapping, mask).item()
+                        layer_mapping, mask,
+                        sample_weight=align_sample_weight).item()
                     if phase == 'finetune' and kd_weight > 0.0:
                         kd_val = self.output_kd_loss(
                             z_s, z_t, mask,
-                            temperature=kd_temperature).item()
+                            temperature=kd_temperature,
+                            sample_weight=kd_sample_weight).item()
                     if phase == 'finetune' and blank_kd_weight > 0.0:
                         blank_kd_val = self.blank_nonblank_kd_loss(
                             z_s, z_t, mask, blank_id=blank_id,
-                            temperature=kd_temperature).item()
+                            temperature=kd_temperature,
+                            sample_weight=kd_sample_weight).item()
 
                 if torch.isfinite(loss_ctc):
                     num_seen_utts += num_utts

@@ -136,7 +136,8 @@ def ctc_loss(logits: torch.Tensor,
              target: torch.Tensor,
              logits_lengths: torch.Tensor,
              target_lengths: torch.Tensor,
-             need_acc: bool = False):
+             need_acc: bool = False,
+             sample_weight: torch.Tensor = None):
     """ CTC Loss
     Args:
         logits: (B, D), D is the number of keywords plus 1 (non-keyword)
@@ -154,12 +155,19 @@ def ctc_loss(logits: torch.Tensor,
     # logits: (B, L, D) -> (L, B, D)
     logits = logits.transpose(0, 1)
     logits = logits.log_softmax(2)
-    loss = F.ctc_loss(logits,
-                      target,
-                      logits_lengths,
-                      target_lengths,
-                      reduction='sum')
-    loss = loss / logits.size(1)  # batch mean
+    per_sample_loss = F.ctc_loss(logits,
+                                 target,
+                                 logits_lengths,
+                                 target_lengths,
+                                 reduction='none')
+    if sample_weight is not None:
+        sample_weight = sample_weight.to(
+            device=per_sample_loss.device,
+            dtype=per_sample_loss.dtype)
+        weight_sum = sample_weight.sum().clamp_min(1e-8)
+        loss = (per_sample_loss * sample_weight).sum() / weight_sum
+    else:
+        loss = per_sample_loss.mean()
 
     return loss, acc
 
@@ -188,6 +196,7 @@ def criterion(
     target_lengths: torch.Tensor = None,
     min_duration: int = 0,
     validation: bool = False,
+    sample_weight: torch.Tensor = None,
 ):
     if type == 'ce':
         loss, acc = cross_entropy(logits, target)
@@ -197,7 +206,7 @@ def criterion(
         return loss, acc
     elif type == 'ctc':
         loss, acc = ctc_loss(logits, target, lengths, target_lengths,
-                             validation)
+                             validation, sample_weight=sample_weight)
         return loss, acc
     else:
         exit(1)
