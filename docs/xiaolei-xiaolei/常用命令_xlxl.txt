@@ -3,6 +3,78 @@
 # ==================================================
 
 # ====================================================================
+# 样本加权 ctc_only v1（已完成）
+# 作用：验证“只对 CTC 做 hard positive 加权”是否比 all-loss weighting 更稳；当前结论是 `124.pt` 也只有 `93.03% / 98.82%`，整条线先收口
+# ====================================================================
+python tools/build_xiaolei_hard_positive_weight_map.py --source-data-dir data_xlxl_0327_ctc_v1_clean --teacher-score exp/fsmn_ctc_xlxl_top20_weight_surgery/train_159/score.txt --student-score exp/fsmn_ctc_xlxl_distill_199k/train_119/score.txt --keyword 小雷小雷 --hard-weight 5.0 --default-weight 1.0 --output-json exp/xlxl_aux/hardpos_weight_from119_v1.json --output-summary exp/xlxl_aux/hardpos_weight_from119_v1_summary.json --output-hard-rows exp/xlxl_aux/hardpos_weight_from119_v1_rows.jsonl
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --gpus 1 --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --align_epochs 120 --finetune_epochs 30 --finetune_lr 0.00005 --head_lr_ratio 0.1 --sample_weight_file exp/xlxl_aux/hardpos_weight_from119_v1.json --default_sample_weight 1.0 --sample_weight_scope ctc_only 2 3
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --test-id 124 --target-fa-per-hour 1.0 --pick-mode legacy
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --test-id 129 --target-fa-per-hour 1.0 --pick-mode legacy
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --test-id avg_30 --target-fa-per-hour 1.0 --pick-mode legacy
+python evaluate_infer_wav.py --model_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --checkpoint_name avg_30.pt --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --test_data data_xlxl_0327_ctc_v1_clean/test/data.list --gpus 1 --streaming --chunk_ms 300 --result_test_id test_infer_stream_avg30_chunk300
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --student-test-id avg_30 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --student-test-id avg_30 --repeat 3 --chunk-ms 300 --gpu 0
+
+# ====================================================================
+# 下一步：head-only hard positive replay v1
+# 作用：停止继续改整个 backbone，只动 HEAD，验证能否在保住 119.pt 主体能力的同时，把 hard positive 的输出路径拉回正确方向
+# ====================================================================
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean_hardpos_replay_v2 --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --gpus 1 --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --align_epochs 120 --finetune_epochs 10 --finetune_lr 0.0001 --head_lr_ratio 1.0 --finetune_trainable_scope head_only --num_average 10 2 3
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --test-id avg_10 --target-fa-per-hour 1.0 --pick-mode legacy
+python evaluate_infer_wav.py --model_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --checkpoint_name avg_10.pt --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --test_data data_xlxl_0327_ctc_v1_clean/test/data.list --gpus 1 --streaming --chunk_ms 300 --result_test_id test_infer_stream_avg10_chunk300
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --test-id test_infer_stream_avg10_chunk300 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --student-test-id avg_10 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --student-test-id avg_10 --repeat 3 --chunk-ms 300 --gpu 0
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --test-id avg_5 --target-fa-per-hour 1.0 --pick-mode legacy
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --test-id 129 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --student-test-id 129 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --student-test-id 129 --repeat 3 --chunk-ms 300 --gpu 0
+
+# ====================================================================
+# head-only hard positive replay v2（已完成）
+# 作用：验证把 head-only 从 10 epoch 拉到 20 epoch 是否还能继续提升；当前结论是 `avg_5/139` 都仍停在 `98.20% / 99.74%`，`0031 x3` 还是 `1/3`
+# ====================================================================
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean_hardpos_replay_v2 --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2 --gpus 0 --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --align_epochs 120 --finetune_epochs 20 --finetune_lr 0.0001 --head_lr_ratio 1.0 --finetune_trainable_scope head_only --num_average 5 2 3
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2 --test-id avg_5 --target-fa-per-hour 1.0 --pick-mode legacy
+python evaluate_infer_wav.py --model_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2 --checkpoint_name avg_5.pt --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --test_data data_xlxl_0327_ctc_v1_clean/test/data.list --gpus 0 --streaming --chunk_ms 300 --result_test_id test_infer_stream_avg5_chunk300
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2 --test-id test_infer_stream_avg5_chunk300 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2 --student-test-id avg_5 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2 --student-test-id avg_5 --repeat 3 --chunk-ms 300 --gpu 0
+bash evaluate.sh --checkpoint exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2/139.pt --dataset test --data_dir data_xlxl_0327_ctc_v1_clean --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --gpu 0
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2 --test-id 139 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v2 --student-test-id 139 --repeat 3 --chunk-ms 300 --gpu 0
+
+# ====================================================================
+# prefix-start hard positive replay v1（已完成）
+# 作用：只强化“前缀起步失败 / 雷小雷塌缩”子集；当前结论是 `98.05% / 99.74%`，`0031 x3` 仍为 `1/3`，不继续这条线
+# ====================================================================
+python tools/mine_xiaolei_prefixstart_hardpositives.py --rows-jsonl data_xlxl_0327_ctc_v1_clean_hardpos_replay_v2/hard_positive_rows.jsonl --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --config exp/fsmn_ctc_xlxl_distill_199k/config.yaml --dict-dir dict_top20_xlxl --stats-dir exp/fsmn_ctc_xlxl_distill_199k/test_119 --keyword 小雷小雷 --keywords "小雷小雷,小雷快拍" --select-mode greedy_not_start --gpu 0 --output-rows-jsonl exp/xlxl_aux/prefixstart_hardpos_from119_v1_rows.jsonl --output-summary exp/xlxl_aux/prefixstart_hardpos_from119_v1_summary.json --output-manifest exp/xlxl_aux/prefixstart_hardpos_from119_v1_manifest.jsonl
+python tools/build_xiaolei_selected_replay_data.py --source-data-dir data_xlxl_0327_ctc_v1_clean --rows-jsonl exp/xlxl_aux/prefixstart_hardpos_from119_v1_rows.jsonl --replay-factor 20 --output-dir data_xlxl_0327_ctc_v1_clean_prefixstart_replay_v1
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean_prefixstart_replay_v1 --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_prefixstart_replay_head_only_from119_v1 --gpus 0 --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --align_epochs 120 --finetune_epochs 10 --finetune_lr 0.0001 --head_lr_ratio 1.0 --finetune_trainable_scope head_only --num_average 10 2 3
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_prefixstart_replay_head_only_from119_v1 --test-id avg_10 --target-fa-per-hour 1.0 --pick-mode legacy
+python evaluate_infer_wav.py --model_dir exp/fsmn_ctc_xlxl_distill_199k_prefixstart_replay_head_only_from119_v1 --checkpoint_name avg_10.pt --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --test_data data_xlxl_0327_ctc_v1_clean/test/data.list --gpus 0 --streaming --chunk_ms 300 --result_test_id test_infer_stream_avg10_chunk300
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_prefixstart_replay_head_only_from119_v1 --test-id test_infer_stream_avg10_chunk300 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_prefixstart_replay_head_only_from119_v1 --student-test-id avg_10 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_prefixstart_replay_head_only_from119_v1 --student-test-id avg_10 --repeat 3 --chunk-ms 300 --gpu 0
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_prefixstart_replay_head_only_from119_v1 --test-id 129 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_prefixstart_replay_head_only_from119_v1 --student-test-id 129 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --student-test-id avg_10 --repeat 3 --gap-ms 300 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_head_only_from119_v1 --student-test-id 129 --repeat 3 --gap-ms 300 --chunk-ms 300 --gpu 0
+
+# ====================================================================
+# 下一步：repeated-sequence replay v1
+# 作用：把 prefix-start hard positives 合成为 `小雷小雷 x3` 长序列样本，标签也扩展成三遍关键词，直接训练连续多次触发路径
+# ====================================================================
+python tools/build_xiaolei_repeated_sequence_replay_data.py --source-data-dir data_xlxl_0327_ctc_v1_clean_hardpos_replay_v2 --rows-jsonl exp/xlxl_aux/prefixstart_hardpos_from119_v1_rows.jsonl --repeat 3 --gap-ms 0 --add-factor 1 --output-dir data_xlxl_0327_ctc_v1_clean_repeatedseq_replay_v1
+cat data_xlxl_0327_ctc_v1_clean_repeatedseq_replay_v1/repeated_sequence_replay_summary.json
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean_repeatedseq_replay_v1 --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_repeatedseq_replay_head_only_from119_v1 --gpus 0 --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --align_epochs 120 --finetune_epochs 10 --finetune_lr 0.0001 --head_lr_ratio 1.0 --finetune_trainable_scope head_only --num_average 10 2 3
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_repeatedseq_replay_head_only_from119_v1 --test-id avg_10 --target-fa-per-hour 1.0 --pick-mode legacy
+python evaluate_infer_wav.py --model_dir exp/fsmn_ctc_xlxl_distill_199k_repeatedseq_replay_head_only_from119_v1 --checkpoint_name avg_10.pt --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --test_data data_xlxl_0327_ctc_v1_clean/test/data.list --gpus 0 --streaming --chunk_ms 300 --result_test_id test_infer_stream_avg10_chunk300
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_repeatedseq_replay_head_only_from119_v1 --test-id test_infer_stream_avg10_chunk300 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_repeatedseq_replay_head_only_from119_v1 --student-test-id avg_10 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_repeatedseq_replay_head_only_from119_v1 --student-test-id avg_10 --repeat 3 --chunk-ms 300 --gpu 0
+
+# ====================================================================
 # 数据准备：生成 0327 小雷数据集
 # 作用：把 小雷小雷 / 小雷快拍 / filler / 额外负样本 合并成 train/dev/test 三个 split
 # ====================================================================
@@ -239,8 +311,8 @@ python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/e
 python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_from119_v1 --student-test-id avg_30 --repeat 3 --chunk-ms 300 --gpu 0
 
 # ====================================================================
-# 下一步主线：hard positive replay v2（更强 replay + 更短 schedule）
-# 作用：v1 说明 replay 方向不完全错，但 replay_factor=3 只额外增加了 2478 条样本，占总 train 仅 1.55%，信号太弱；下一步优先放大 replay 干预并缩短 from119 漂移时间
+# replay-only v2（已完成）
+# 作用：验证“更强 replay + 更短 schedule + 更低 lr”能否救回 hardcase；当前结论是静态几乎没动、hardcase 仍然 1/3，因此 replay-only 到 v2 为止先收口
 # ====================================================================
 
 # Step 1: 重新生成更强 replay 的训练集
@@ -258,10 +330,64 @@ python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/e
 python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_replay_from119_v2 --student-test-id avg_30 --repeat 3 --chunk-ms 300 --gpu 0
 
 # ====================================================================
-# 自治实验队列：后台自动等待当前实验结束，并按 gate 继续跑 v3 / v4
-# 作用：不再靠人工盯 tmux；由本地 runner 自动补 static / streaming / hardcase、写结果记录，并决定下一轮
+# 下一步主线：teacher-hit / student-miss 样本加权 v1
+# 作用：replay-only 到 v2 为止已经验证“继续堆 replay_factor / 继续缩短 schedule”收益很低；下一步改成在 loss 层显式提高这批 hard positive 的权重
+# 说明：这条线当前还未实现到训练脚本，所以这里先保留为决策说明，不再推荐继续跑 replay v3 / v4
 # ====================================================================
-tmux new-session -d -s xlxl_autorun 'cd /home/wayne/work/code/project/ffalcon/wekws_baseline/examples/hi_xiaowen/s0 && source /home/wayne/miniconda3/etc/profile.d/conda.sh && conda activate wayne3.10 && python tools/xlxl_autorun.py'
-tmux attach -t xlxl_autorun
-tail -f codex_artifacts/xlxl_autorun/logs/hardpos_replay_v2.log
-cat codex_artifacts/xlxl_autorun/state.json
+# 当前决策：
+# 1. 停止 replay-only 的 v3 / v4
+# 2. 下一步从 119.pt 出发做 sample weighting
+# 3. 首轮建议：
+#    - 普通样本 weight = 1.0
+#    - hard positive weight = 4.0 或 5.0
+#    - finetune_epochs = 30
+#    - finetune_lr = 5e-5
+
+# ====================================================================
+# 下一步主线：teacher-hit / student-miss 样本加权 v1
+# 作用：replay-only 到 v2 为止已经进入平台期；这一步改成在 loss 层显式提高 826 条 hard positive 的权重
+# 说明：不复制 train rows，不修改外部 wenet 包；直接用 key->weight 映射驱动 CTC/MSE/KD 的 weighted mean
+# ====================================================================
+
+# Step 1: 生成 hard positive 的 sample-weight 映射
+python tools/build_xiaolei_hard_positive_weight_map.py --source-data-dir data_xlxl_0327_ctc_v1_clean --teacher-score exp/fsmn_ctc_xlxl_top20_weight_surgery/train_159/score.txt --student-score exp/fsmn_ctc_xlxl_distill_199k/train_119/score.txt --keyword 小雷小雷 --hard-weight 5.0 --default-weight 1.0 --output-json exp/xlxl_aux/hardpos_weight_from119_v1.json --output-summary exp/xlxl_aux/hardpos_weight_from119_v1_summary.json --output-hard-rows exp/xlxl_aux/hardpos_weight_from119_v1_rows.jsonl
+cat exp/xlxl_aux/hardpos_weight_from119_v1_summary.json
+
+# Step 2: 从 119.pt 起跑样本加权 v1
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_from119_v1 --gpus 0,1,2,3 --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --align_epochs 120 --finetune_epochs 30 --finetune_lr 0.00005 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.3 --finetune_mse_weight_end 0.1 --sample_weight_file exp/xlxl_aux/hardpos_weight_from119_v1.json --default_sample_weight 1.0 2 3
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_from119_v1 --test-id avg_30 --target-fa-per-hour 1.0 --pick-mode legacy
+
+# Step 3: 样本加权 v1 的 streaming / hard case gate
+python evaluate_infer_wav.py --model_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_from119_v1 --checkpoint_name avg_30.pt --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --test_data data_xlxl_0327_ctc_v1_clean/test/data.list --gpus 0 --streaming --chunk_ms 300 --result_test_id test_infer_stream_avg30_chunk300
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_from119_v1 --test-id test_infer_stream_avg30_chunk300 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_from119_v1 --student-test-id avg_30 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_from119_v1 --student-test-id avg_30 --repeat 3 --chunk-ms 300 --gpu 0
+
+# ====================================================================
+# 样本加权 all-loss v1（已完成）
+# 作用：验证“直接把 826 条 hard positives 提到 hard_weight=5.0，并对 CTC/MSE/KD 全部分支加权”是否有效；当前结论是明显变差，所以不再继续沿用 all-loss weighting
+# ====================================================================
+
+# 当前结论：
+# 1. hardpos_weight_from119_v1 = 90.85 / 98.43，明显差于 replay v2 和 119.pt
+# 2. streaming 与静态完全一致，没有隐藏收益
+# 3. 两条 repeated hardcase 仍然都是 1/3，只打到 segment 1
+# 4. 下一步不继续堆 hard_weight，而是改成 ctc_only weighting
+
+# ====================================================================
+# 下一步主线：teacher-hit / student-miss 样本加权 CTC-only v1
+# 作用：保留同一批 826 条 hard positives、保留 hard_weight=5.0，但只让 CTC 分支吃到 sample weight，避免把 MSE/KD 一起放大
+# ====================================================================
+
+# Step 1: 继续复用同一个 hard positive weight map
+cat exp/xlxl_aux/hardpos_weight_from119_v1_summary.json
+
+# Step 2: 从 119.pt 起跑 CTC-only weighting v1
+bash run_distill.sh --data_dir data_xlxl_0327_ctc_v1_clean --teacher_checkpoint exp/fsmn_ctc_xlxl_top20_weight_surgery/159.pt --student_config conf/fsmn_ctc_student_mini.yaml --dict_dir dict_top20_xlxl --num_keywords 20 --keywords "小雷小雷,小雷快拍" --target_exp_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --gpus 0,1,2,3 --checkpoint exp/fsmn_ctc_xlxl_distill_199k/119.pt --align_epochs 120 --finetune_epochs 30 --finetune_lr 0.00005 --head_lr_ratio 0.1 --finetune_mse_weight_start 0.3 --finetune_mse_weight_end 0.1 --sample_weight_file exp/xlxl_aux/hardpos_weight_from119_v1.json --default_sample_weight 1.0 --sample_weight_scope ctc_only 2 3
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --test-id avg_30 --target-fa-per-hour 1.0 --pick-mode legacy
+
+# Step 3: CTC-only weighting v1 的 streaming / hard case gate
+python evaluate_infer_wav.py --model_dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --checkpoint_name avg_30.pt --dict_dir dict_top20_xlxl --keywords "小雷小雷,小雷快拍" --test_data data_xlxl_0327_ctc_v1_clean/test/data.list --gpus 0 --streaming --chunk_ms 300 --result_test_id test_infer_stream_avg30_chunk300
+python analyze_exp_test_stats.py --exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --test-id test_infer_stream_avg30_chunk300 --target-fa-per-hour 1.0 --pick-mode legacy
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0031_1m_f_04_fast_01_rep_10.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --student-test-id avg_30 --repeat 3 --chunk-ms 300 --gpu 0
+python tools/analyze_repeated_hardcase_streaming.py --wav /home/xushang/kws_ws/extra_datasets/kws_data_0327/XIAOLEI_XIAOLEI/XIAOLEI_XIAOLEI_0021_1m_f_01_fast_04_rep_14.wav --student-exp-dir exp/fsmn_ctc_xlxl_distill_199k_hardpos_weight_ctc_only_from119_v1 --student-test-id avg_30 --repeat 3 --chunk-ms 300 --gpu 0
