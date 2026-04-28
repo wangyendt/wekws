@@ -50,7 +50,10 @@ def parse_args():
     parser.add_argument(
         "--output",
         default="",
-        help="output .tflite path; default: <checkpoint_dir>/<stem>_stream_native_int8.tflite",
+        help=(
+            "output .tflite path; default: "
+            "<checkpoint_dir>/<stem>_stream_native_{int8|fullint8}_calib<N>.tflite"
+        ),
     )
     parser.add_argument(
         "--num_calib",
@@ -92,6 +95,14 @@ def parse_args():
         default="",
         help="temp directory for onnx2tf; default: <output_dir>/.onnx2tf_tmp",
     )
+    parser.add_argument(
+        "--full_integer_io",
+        action="store_true",
+        help=(
+            "copy onnx2tf *_full_integer_quant.tflite so model inputs/outputs are int8; "
+            "default keeps float32 IO for cache accuracy"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -99,10 +110,18 @@ def resolve_onnx_path(checkpoint: Path) -> Path:
     return checkpoint.with_name(f"{checkpoint.stem}_stream_step.onnx")
 
 
-def resolve_output_path(checkpoint: Path, output: str, num_calib: int) -> Path:
+def resolve_output_path(
+    checkpoint: Path,
+    output: str,
+    num_calib: int,
+    full_integer_io: bool = False,
+) -> Path:
     if output:
         return Path(output).expanduser().resolve()
-    return checkpoint.with_name(f"{checkpoint.stem}_stream_native_int8_calib{num_calib}.tflite")
+    io_suffix = "fullint8" if full_integer_io else "int8"
+    return checkpoint.with_name(
+        f"{checkpoint.stem}_stream_native_{io_suffix}_calib{num_calib}.tflite"
+    )
 
 
 def export_onnx(
@@ -262,6 +281,7 @@ def convert_onnx_to_int8_tflite(
     cache_npy: Path,
     output_path: Path,
     tmp_dir: Path,
+    full_integer_io: bool = False,
 ) -> None:
     """Convert ONNX to INT8 TFLite using onnx2tf."""
     import onnx2tf
@@ -292,20 +312,25 @@ def convert_onnx_to_int8_tflite(
         disable_model_save=False,
     )
 
-    integer_quant_path = work_dir / f"{onnx_path.stem}_integer_quant.tflite"
+    quant_suffix = "full_integer_quant" if full_integer_io else "integer_quant"
+    integer_quant_path = work_dir / f"{onnx_path.stem}_{quant_suffix}.tflite"
     if not integer_quant_path.exists():
-        candidates = sorted(
-            path for path in work_dir.glob("*_integer_quant.tflite")
-            if "int16_act" not in path.name
-        )
+        candidates = []
+        for path in work_dir.glob(f"*_{quant_suffix}.tflite"):
+            if "int16_act" in path.name:
+                continue
+            if not full_integer_io and "full_integer_quant" in path.name:
+                continue
+            candidates.append(path)
+        candidates = sorted(candidates)
         if candidates:
             integer_quant_path = candidates[0]
-    if not integer_quant_path.exists():
-        # Fallback: try the default name from older onnx2tf versions
+    if not integer_quant_path.exists() and not full_integer_io:
+        # Fallback: try the default name from older onnx2tf versions.
         integer_quant_path = work_dir / "model_integer_quant.tflite"
     if not integer_quant_path.exists():
         raise FileNotFoundError(
-            f"onnx2tf did not produce model_integer_quant.tflite in {work_dir}"
+            f"onnx2tf did not produce *_{quant_suffix}.tflite in {work_dir}"
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -322,7 +347,12 @@ def main():
     config_path = Path(args.config).expanduser().resolve()
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
     onnx_path = resolve_onnx_path(checkpoint_path)
-    output_path = resolve_output_path(checkpoint_path, args.output, args.num_calib)
+    output_path = resolve_output_path(
+        checkpoint_path,
+        args.output,
+        args.num_calib,
+        full_integer_io=args.full_integer_io,
+    )
     tmp_dir = (
         Path(args.tmp_dir).expanduser().resolve()
         if args.tmp_dir
@@ -345,6 +375,7 @@ def main():
     print(f"onnx_path: {onnx_path}")
     print(f"output_path: {output_path}")
     print(f"tmp_dir: {tmp_dir}")
+    print(f"full_integer_io: {args.full_integer_io}")
 
     # Step 1: ONNX export
     if not args.skip_onnx:
@@ -382,6 +413,7 @@ def main():
         cache_npy=cache_npy,
         output_path=output_path,
         tmp_dir=tmp_dir,
+        full_integer_io=args.full_integer_io,
     )
 
     # Cleanup calibration .npy files
@@ -396,7 +428,12 @@ def main():
             "onnx": str(onnx_path),
             "output": str(output_path),
             "pipeline": "pytorch_onnx_onnx2tf",
-            "quant_mode": "int8_weights_float32_io",
+            "quant_mode": (
+                "int8_full_integer_io"
+                if args.full_integer_io
+                else "int8_weights_float32_io"
+            ),
+            "full_integer_io": bool(args.full_integer_io),
             "input_dim": input_dim,
             "cache_shape": list(cache_shape),
             "calib_data": str(calib_data_path),
