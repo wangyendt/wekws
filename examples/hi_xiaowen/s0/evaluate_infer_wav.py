@@ -69,6 +69,11 @@ def parse_args():
     parser.add_argument("--pin_memory", action="store_true", help="是否启用 dataloader pin_memory")
     parser.add_argument("--progress_every", type=int, default=1000, help="每处理多少条打印一次进度")
     parser.add_argument("--streaming", action="store_true", help="按流式方式评测，每条 wav 按 chunk 模拟在线输入")
+    parser.add_argument(
+        "--streaming_first_trigger",
+        action="store_true",
+        help="流式评测时采用在线首次触发口径：首次检测到唤醒即停止该条音频；默认仍使用整段 best decode 口径",
+    )
     parser.add_argument("--chunk_ms", type=float, default=1000.0, help="流式评测时每次送入的音频 chunk 时长，批量评测建议 1000~2000ms")
     parser.add_argument("--path_beam_size", type=int, default=20, help="流式评测时 prefix beam size")
     parser.add_argument("--use_cpp_decoder", action="store_true", help="流式评测时使用 C++ pybind beam search / keyword detection")
@@ -319,7 +324,22 @@ def worker_eval(
                 waveform = iw.load_wav_and_resample(wav_path, streamer.sample_rate)
                 waveform = waveform.squeeze(0).numpy()
                 pcm = np.clip(np.round(waveform * (1 << 15)), -32768, 32767).astype(np.int16)
-                decode_result = iws.collect_streaming_best_decode(streamer, pcm, args.chunk_ms)
+                if args.streaming_first_trigger:
+                    chunk_samples = max(1, int(args.chunk_ms / 1000.0 * streamer.sample_rate))
+                    decode_result = None
+                    for start in range(0, pcm.shape[0], chunk_samples):
+                        decode_result = streamer.forward_chunk(pcm[start:start + chunk_samples])
+                        if decode_result is not None:
+                            break
+                    if decode_result is None:
+                        decode_result = {
+                            "candidate_keyword": None,
+                            "candidate_score": None,
+                            "start_frame": None,
+                            "end_frame": None,
+                        }
+                else:
+                    decode_result = iws.collect_streaming_best_decode(streamer, pcm, args.chunk_ms)
                 score_fout.write(score_line_from_decode(key, decode_result))
                 result = build_result_from_meta(
                     meta=meta,
@@ -330,6 +350,7 @@ def worker_eval(
                 )
                 result["mode"] = "streaming"
                 result["decode_mode"] = decode_mode
+                result["streaming_trigger_policy"] = "first_trigger" if args.streaming_first_trigger else "best_decode"
                 result["chunk_ms"] = args.chunk_ms
                 result["streaming_lookahead_sec"] = lookahead_sec
                 result["model_type"] = model_type
